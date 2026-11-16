@@ -65,6 +65,13 @@ def route(path: str, body: dict) -> dict:
         "/api/plugin/disable": lambda: service.plugin_disable(itemId, force),
         "/api/plugin/upload": lambda: service.plugin_upload(itemId),
         "/api/plugin/delete": lambda: service.plugin_delete(itemId, force),
+        "/api/mcp/enable": lambda: service.mcp_enable(itemId, force),
+        "/api/mcp/disable": lambda: service.mcp_disable(itemId, force),
+        "/api/mcp/upload": lambda: service.mcp_upload(itemId),
+        "/api/mcp/delete": lambda: service.mcp_delete(itemId, force),
+        "/api/rules/save": lambda: service.rules_save(body.get("text", "")),
+        "/api/rules/import": lambda: service.rules_import(body.get("path", "")),
+        "/api/rules/apply": lambda: service.rules_apply(force),
         "/api/plugin/available": lambda: service.plugin_available(),
         "/api/plugin/add-market": lambda: service.plugin_add_market(body.get("source", "")),
         "/api/targets": lambda: service.set_targets(body.get("ids", [])),
@@ -83,12 +90,17 @@ def route(path: str, body: dict) -> dict:
 
 
 def open_folder(path: str) -> dict:
-    """在资源管理器里打开文件夹（用户主动点击才调用）。
+    """在资源管理器里打开文件夹；给的是文件时打开它所在的文件夹并选中它（用户主动点击才调用）。
 
-    :param path: 文件夹路径
+    :param path: 文件夹或文件路径
     :returns: 结果
     """
     folder = Path(path)
+    if folder.is_file():
+        if sys.platform == "win32":
+            subprocess.Popen(["explorer", "/select,", str(folder)])
+            return {"message": "已打开"}
+        folder = folder.parent
     if not folder.is_dir():
         raise UserError(f"文件夹不存在：{path}")
     if sys.platform == "win32":

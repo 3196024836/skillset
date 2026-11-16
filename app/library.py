@@ -3,8 +3,9 @@
 
 目录结构：
     library/
-        manifest.json        清单：中文名、介绍、分组、启用状态、插件记录
+        manifest.json        清单：中文名、介绍、分组、启用状态、插件记录、MCP 定义
         skills/<英文名>/      skill 正本
+        rules/global.md      全局 AI 规则正本（同步成 CLAUDE.md、AGENTS.md、GEMINI.md）
 
 本类只管清单读写和 git，不碰各个 AI 的目录。
 """
@@ -43,6 +44,8 @@ class Library:
         self.skillsDir = self.path / "skills"
         # 清单文件
         self.manifestPath = self.path / "manifest.json"
+        # 全局规则正本
+        self.rulesPath = self.path / "rules" / "global.md"
 
     def ensure(self) -> None:
         """确保库目录、清单、git 仓库都存在；第一次运行时初始化。"""
@@ -69,6 +72,7 @@ class Library:
         data.setdefault("skills", {})
         data.setdefault("plugins", {})
         data.setdefault("marketplaces", {})
+        data.setdefault("mcps", {})
         return data
 
     def save(self, manifest: dict) -> None:
@@ -77,7 +81,7 @@ class Library:
         :param manifest: 清单字典
         """
         manifest = {"version": ManifestVersion, "groups": [], "skills": {}, "plugins": {},
-                    "marketplaces": {}, **manifest}
+                    "marketplaces": {}, "mcps": {}, **manifest}
         self.path.mkdir(parents=True, exist_ok=True)
         text = json.dumps(manifest, ensure_ascii=False, indent=2, sort_keys=True) + "\n"
         self.manifestPath.write_text(text, encoding="utf-8", newline="\n")

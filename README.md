@@ -20,6 +20,8 @@
 - **一键装到所有 AI**：Claude Code、Codex、Gemini CLI、Cursor、Copilot、Windsurf、OpenCode、Antigravity 等，共支持 31 款 AI。
 - **分组**：自建「生图」「Unity 开发」之类的分组，skill 和插件都能放进去，整组开关；把条目拖到左侧分组即可归类。
 - **Claude Code 插件**：安装、卸载、浏览市场，插件里包含的 skill 展开可见。
+- **MCP 工具**：扫描 Claude Code、Codex、Gemini CLI 等的 MCP 配置，统一开关、上传、同步到所有 AI。密钥（如 `API_KEY`）只记名字不上传，装到别的 AI 时从本机已有的配置里补上。
+- **全局规则**：一份规则正本，同步成各 AI 的全局规则文件（`CLAUDE.md`、`AGENTS.md`、`GEMINI.md`）；可从任一 AI 导入，覆盖不同内容前先问并备份。
 - **云端 = 你自己的 GitHub 私有仓库**：上传、更新、删除；换新电脑连上同一个仓库，一键全部装回。
 - **上传前查密钥**：发现 API key、token、私钥就拦下，不会推到云端。
 
@@ -77,6 +79,8 @@ cd skillset
 - **库是正本**：skill 原件和 `manifest.json`（中文名、介绍、分组、启用状态、插件和市场来源）放在单独的 git 仓库里。
 - **AI 目录里放副本**：通过内容哈希判断每个副本「一致 / 有改动 / 仅本机」。
 - **插件**：只通过官方 `claude plugin` 命令安装和卸载，库里只记插件名和市场来源。
+- **MCP**：定义存在 `manifest.json` 的 `mcps` 里（密钥值清空）；Claude Code 通过官方 `claude mcp` 命令写入，其他 AI 直接改各自的配置文件（JSON / TOML），改之前备份到 `data/backups/`。
+- **全局规则**：正本是 `library/rules/global.md`；同步时只给没有规则文件的 AI 写上，已有不同内容的要在「全局规则」页手动应用。
 - **AI 列表**：在 `app/agents.json` 里，加新 AI 只要加一行。
 - **安全**：服务只监听 `127.0.0.1`，并校验请求头和 Host，其他网页调用不了。
 
@@ -86,6 +90,7 @@ cd skillset
 app/
   server.py     本地 HTTP 服务 + 应用窗口 + 桌面快捷方式
   service.py    业务逻辑：启用、关闭、上传、同步、分组、插件、连接云端
+  mcp_service.py  MCP 工具和全局规则的业务逻辑   mcp.py  各 AI 的 MCP 配置读写
   library.py    库（git）操作        skillfs.py   扫描、哈希、复制、密钥检查
   plugins.py    claude plugin 命令   github.py    GitHub CLI 登录和建仓库
   agents.json   支持的 AI 及目录

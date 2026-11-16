@@ -528,6 +528,14 @@ select.field { appearance: none; padding-right: 28px; background-image: url("dat
 .saved-tick.show { opacity: 1; }
 .readonly { max-height: 150px; overflow-y: auto; padding: 8px 10px; border-radius: var(--r-sm); background: var(--fill-3); color: var(--label-2); font-size: 12px; line-height: 1.55; user-select: text; }
 .copy-list { border-radius: var(--r-sm); background: var(--fill-3); }
+/* MCP 配置 */
+.spec { border-radius: var(--r-sm); background: var(--fill-3); padding: 4px 0; font-size: 12px; }
+.spec > div { display: flex; gap: 10px; padding: 4px 10px; }
+.spec span { flex: 0 0 auto; width: 74px; color: var(--label-3); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.spec code { flex: 1; min-width: 0; font-family: var(--font-mono); font-size: 11px; color: var(--label); word-break: break-all; user-select: text; }
+.form-row .hint { display: flex; gap: 6px; align-items: flex-start; margin-top: 6px; font-size: 11.5px; color: var(--label-2); line-height: 1.5; }
+.form-row .hint svg { flex: 0 0 13px; width: 13px; height: 13px; margin-top: 2px; color: var(--orange); }
+.copy-item .where b .faint { font-weight: 400; margin-left: 4px; color: var(--label-3); }
 .copy-item { display: flex; align-items: center; gap: 8px; padding: 7px 10px; font-size: 12px; }
 .copy-item + .copy-item { border-top: .5px solid var(--separator); }
 .copy-item .where { flex: 1; min-width: 0; }
@@ -718,3 +726,10 @@ dialog.palette { width: 560px; top: 14vh; margin-top: 0; border-radius: var(--r-
   .row { grid-template-columns: 18px 32px minmax(130px, 200px) minmax(0, 1fr) auto; }
   .row .chips { display: none; }
 }
+
+/* 全局规则页 */
+.rules-page { max-width: 900px; }
+.rules-card { padding: 10px; }
+.rules-card textarea { display: block; width: 100%; min-height: 46vh; resize: vertical; font-family: var(--font-mono); font-size: 12.5px; line-height: 1.6; tab-size: 2; }
+.rules-actions { display: flex; align-items: center; gap: 8px; margin-top: 10px; }
+.rules-actions .grow { flex: 1; min-width: 0; font-size: 12px; }

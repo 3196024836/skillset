@@ -56,13 +56,18 @@ const I = {
   bag: svg('<path d="M5 8h14l-1 12H6z"/><path d="M9 8V6.5a3 3 0 0 1 6 0V8"/>'),
   link: svg('<path d="M10 14a4 4 0 0 0 5.7 0l3-3a4 4 0 0 0-5.7-5.7l-1 1"/><path d="M14 10a4 4 0 0 0-5.7 0l-3 3a4 4 0 0 0 5.7 5.7l1-1"/>'),
   key: svg('<circle cx="8" cy="15" r="4"/><path d="m11 12 9-9M17 6l2 2M15 8l2 2"/>'),
+  plug: svg('<path d="M9 3v4M15 3v4"/><path d="M6.5 7h11v3.5a5.5 5.5 0 0 1-11 0z"/><path d="M12 16v5"/>'),
+  doc: svg('<path d="M6.5 3.5h7l4 4v13h-11z"/><path d="M13.5 3.5v4h4M9 12h6M9 15.5h6"/>'),
 };
+
+// MCP 条目的头像颜色
+const McpColor = "#30B0C7";
 
 // ============================================================ 状态
 
 // 界面状态
 const ui = {
-  view: "all",                 // all | attention | plugins | group:<id> | ungrouped | agents | settings
+  view: "all",                 // all | attention | plugins | mcps | group:<id> | ungrouped | agents | rules | settings
   filter: "all",
   search: "",
   collapsed: new Set(JSON.parse(localStorage.getItem("collapsed") || "[]")),
@@ -72,10 +77,11 @@ const ui = {
   busyRows: new Set(),         // 正在操作的条目 key
   renderedView: "",            // 上次渲染的视图，用来决定是否播放入场动画
   task: "",                    // 正在执行的长操作
+  rulesDraft: null,            // 全局规则编辑中但还没保存的文本
 };
 // 后端状态
 let state = null;
-// 按 key 索引的条目（skill 和插件）
+// 按 key 索引的条目（skill、插件和 MCP）
 let items = new Map();
 
 /** HTML 转义。 */
@@ -114,7 +120,20 @@ function groupName(groupId) {
 
 /** 条目显示名：有中文名用中文名，否则用英文名。 */
 function title(item) {
-  return item.nameZh || item.id.split("@")[0];
+  return item.nameZh || (item.kind === "mcp" ? item.name : item.id.split("@")[0]);
+}
+
+/** 条目头像：插件和 MCP 用图标，skill 用首字。 */
+function avatarHtml(item) {
+  if (item.kind === "plugin") return { color: "#7C7C86", html: I.puzzle };
+  if (item.kind === "mcp") return { color: McpColor, html: I.plug };
+  return { color: groupColor(item.group), html: esc([...title(item)][0].toUpperCase()) };
+}
+
+/** 规则文件里和正本不一致的数量（侧栏提示用）。 */
+function rulesPending() {
+  const rules = state.rules;
+  return rules.inCloud ? rules.targets.filter((t) => t.install && t.state !== "same").length : 0;
 }
 
 // ============================================================ 加载
@@ -132,6 +151,7 @@ async function refresh() {
   for (const plugin of state.plugins.items) {
     items.set(`p:${plugin.id}`, { ...plugin, kind: "plugin", key: `p:${plugin.id}`, description: plugin.note, missing: [] });
   }
+  for (const server of state.mcps.items) items.set(`m:${server.id}`, { ...server, kind: "mcp", key: `m:${server.id}` });
   // 清掉已经不存在的选择
   for (const key of [...ui.selected]) if (!items.has(key)) ui.selected.delete(key);
   if (ui.inspect && !items.has(ui.inspect)) ui.inspect = "";
@@ -196,6 +216,7 @@ function renderNav() {
     <div class="nav-title">资料库</div>
     ${navItem("all", `<span class="ico">${I.stack}</span>`, "全部", all.length)}
     ${navItem("plugins", `<span class="ico">${I.puzzle}</span>`, "插件", count((item) => item.kind === "plugin"))}
+    ${navItem("mcps", `<span class="ico" style="color:${McpColor}">${I.plug}</span>`, "MCP 工具", count((item) => item.kind === "mcp"))}
     <div class="nav-item ${ui.view === "attention" ? "active" : ""}" data-view="attention" role="button" tabindex="0">
       <span class="ico" style="color:var(--orange)">${I.alert}</span><span class="name">需要处理</span>
       <span class="count ${attention ? "alert" : ""}">${attention || ""}</span></div>
@@ -206,6 +227,7 @@ function renderNav() {
     <div class="nav-title">设置</div>
     ${navItem("agents", `<span class="ico" style="color:var(--purple)">${I.sparkle}</span>`, "AI 应用",
       state.agents.filter((agent) => agent.active).length)}
+    ${navItem("rules", `<span class="ico" style="color:var(--orange)">${I.doc}</span>`, "全局规则", rulesPending() || "")}
     ${navItem("settings", `<span class="ico" style="color:var(--gray)">${I.gear}</span>`, "云端与设置", "")}`;
 }
 
@@ -249,6 +271,12 @@ function renderToolbar() {
     heading = "插件";
     subtitle = `Claude Code 插件 · ${list.length} 个`;
     extra = `<button class="btn" data-act="market">${I.bag}浏览市场</button>`;
+  } else if (ui.view === "mcps") {
+    heading = "MCP 工具";
+    subtitle = `${list.length} 个 · 已启用 ${on} · 改动后要重开对应的 AI 才生效`;
+  } else if (ui.view === "rules") {
+    heading = "全局规则";
+    subtitle = "一份规则，写到所有 AI 的全局规则文件（CLAUDE.md、AGENTS.md、GEMINI.md…）";
   } else if (ui.view === "ungrouped") {
     heading = "未分组";
   } else if (ui.view.startsWith("group:")) {
@@ -268,7 +296,7 @@ function renderToolbar() {
     subtitle = "";
   }
 
-  const listView = !["agents", "settings"].includes(ui.view);
+  const listView = !["agents", "settings", "rules"].includes(ui.view);
   bar.innerHTML = `
     <div class="grow" style="min-width:0"><h1>${esc(heading)}</h1><div class="subtitle">${esc(subtitle)}</div></div>
     ${extra}
@@ -313,6 +341,7 @@ function viewItems(applyFilter = true, applySearch = applyFilter) {
   let list = [...items.values()];
   const view = ui.view;
   if (view === "plugins") list = list.filter((item) => item.kind === "plugin");
+  else if (view === "mcps") list = list.filter((item) => item.kind === "mcp");
   else if (view === "attention") list = list.filter(needsAttention);
   else if (view === "ungrouped") list = list.filter((item) => !groupName(item.group));
   else if (view.startsWith("group:")) list = list.filter((item) => `group:${item.group}` === view);
@@ -332,6 +361,11 @@ function renderContent() {
   const content = document.getElementById("content");
   if (ui.view === "agents") return swap(content, renderAgents());
   if (ui.view === "settings") return swap(content, renderSettings());
+  if (ui.view === "rules") {
+    // 正在输入时不重建，避免丢光标
+    if (document.activeElement?.id === "rulesText") return;
+    return swap(content, renderRules());
+  }
 
   const list = viewItems();
   const animate = ui.renderedView !== ui.view;
@@ -341,6 +375,9 @@ function renderContent() {
 
   if (ui.view === "plugins" && state.plugins.error) {
     return swap(content, emptyHtml(I.puzzle, "读不到插件", state.plugins.error + "\n需要先安装 Claude Code 命令行。"));
+  }
+  if (ui.view === "mcps" && state.mcps.errors.length && !list.length) {
+    return swap(content, emptyHtml(I.plug, "读不到 MCP 配置", state.mcps.errors.join("\n")));
   }
   if (!list.length) {
     if (ui.search) return swap(content, emptyHtml(I.search, "没有找到", `没有和“${ui.search}”匹配的条目`));
@@ -413,15 +450,14 @@ function chipsHtml(item) {
 function rowHtml(item, index) {
   const key = item.key;
   const busy = ui.busyRows.has(key);
-  const color = item.kind === "plugin" ? "#8E8E93" : groupColor(item.group);
-  const avatar = item.kind === "plugin" ? I.puzzle : esc([...title(item)][0].toUpperCase());
+  const avatar = avatarHtml(item);
   const desc = item.note || item.description || "";
   const cls = [!item.enabled && "off", ui.selected.has(key) && "selected", ui.focus === key && "focused", index >= 0 && "enter"].filter(Boolean).join(" ");
   const delay = index >= 0 ? ` style="animation-delay:${Math.min(index, 14) * 16}ms"` : "";
   return `<div class="row ${cls}" data-key="${esc(key)}" draggable="true"${delay}>
     <input type="checkbox" class="check" data-act="check" ${ui.selected.has(key) ? "checked" : ""} aria-label="选择">
-    <div class="avatar" style="--c:${item.kind === "plugin" ? "#7C7C86" : color}">${avatar}</div>
-    <div class="names"><div class="zh">${esc(title(item))}</div><div class="en">${esc(item.id)}</div></div>
+    <div class="avatar" style="--c:${avatar.color}">${avatar.html}</div>
+    <div class="names"><div class="zh">${esc(title(item))}</div><div class="en">${esc(item.kind === "mcp" ? item.name : item.id)}</div></div>
     <div class="desc" title="${esc(desc)}">${esc(desc)}</div>
     <div class="chips">${chipsHtml(item)}</div>
     <div class="row-end">
@@ -508,6 +544,64 @@ function renderSettings() {
   </div>`;
 }
 
+// ============================================================ 渲染：全局规则页
+
+/** 全局规则页：编辑正本，查看各 AI 的规则文件是否一致。 */
+function renderRules() {
+  const rules = state.rules;
+  const text = ui.rulesDraft ?? rules.text;
+  const dirty = ui.rulesDraft !== null && ui.rulesDraft !== rules.text;
+  const stateChip = { same: '<span class="chip ok">一致</span>', different: `<span class="chip warn">${rules.inCloud ? "不一致" : "已有内容"}</span>`,
+    missing: '<span class="chip plain">还没有</span>' };
+  const rows = rules.targets.map((target) => `<div class="list-row">
+      <div class="lbl"><b>${esc(target.label)}</b><span class="mono" title="${esc(target.path)}">${esc(target.path)}</span></div>
+      ${target.install ? "" : '<span class="chip plain">未勾选</span>'}${stateChip[target.state] || ""}
+      ${target.exists ? `<button class="btn sm" data-act="rules-import" data-path="${esc(target.path)}" title="用这个文件的内容替换上面的正本">导入</button>
+        <button class="btn ghost icon sm" data-act="open" data-path="${esc(target.path)}" title="打开所在位置">${I.folder}</button>` : ""}</div>`).join("");
+  return `<div class="page rules-page">
+    <div class="section-title">规则正本${dirty ? ' <span class="chip warn plain">未保存</span>' : ""}</div>
+    <div class="card rules-card">
+      <textarea id="rulesText" class="field mono" spellcheck="false" placeholder="${rules.inCloud ? "" : "还没有全局规则。可以直接写，也可以从下面某个 AI 导入现有的一份。"}">${esc(text)}</textarea>
+      <div class="rules-actions">
+        <span class="faint grow">${rules.inCloud ? "保存在库的 rules/global.md，跟着云端同步" : "还没保存过"}</span>
+        <button class="btn" data-act="rules-save" ${dirty ? "" : "disabled"}>保存</button>
+        <button class="btn primary" data-act="rules-apply" ${rules.inCloud && !dirty ? "" : "disabled"} title="${dirty ? "先保存" : "写到所有勾选的 AI"}">${I.sync}应用到所有 AI</button>
+      </div>
+    </div>
+    <div class="section-foot">应用时会覆盖各 AI 的规则文件，原文件先备份到 data/backups。「同步到所有 AI」只给还没有规则文件的 AI 写上，不覆盖已有的。</div>
+    <div class="section-title">各 AI 的规则文件</div>
+    <div class="card">${rows || '<div class="empty-row">没有检测到支持全局规则的 AI</div>'}</div>
+    <div class="section-foot">Gemini CLI 和 Antigravity 共用 <code>~/.gemini/GEMINI.md</code>。</div>
+  </div>`;
+}
+
+/** 保存规则正本。 */
+async function saveRules() {
+  const text = ui.rulesDraft ?? state.rules.text;
+  const ok = await task("保存全局规则", () => api("/api/rules/save", { text }));
+  if (ok) ui.rulesDraft = null;
+  renderContent();
+}
+
+/** 把正本写到所有 AI，有不一致的先确认。 */
+async function applyRules() {
+  await task("应用全局规则", async () => {
+    const first = await api("/api/rules/apply");
+    return confirmed("/api/rules/apply", {}, first, { head: "覆盖各 AI 现有的规则文件？", action: "覆盖" });
+  });
+}
+
+/** 从某个 AI 的规则文件导入正本。 */
+async function importRules(path) {
+  if (ui.rulesDraft !== null && ui.rulesDraft !== state.rules.text) {
+    const choice = await confirmAlert({ head: "放弃没保存的修改？", message: "导入会用这个文件的内容替换正本。", action: "导入" });
+    if (choice !== "ok") return;
+  }
+  const ok = await task("导入全局规则", () => api("/api/rules/import", { path }));
+  if (ok) ui.rulesDraft = null;
+  renderContent();
+}
+
 // ============================================================ 渲染：详情面板
 
 /** 右侧详情面板。正在编辑时不重建，避免打断输入。 */
@@ -521,25 +615,36 @@ function renderInspector() {
   const groups = `<option value="">未分组</option>` + state.groups.map((group) =>
     `<option value="${esc(group.id)}" ${group.id === item.group ? "selected" : ""}>${esc(group.name)}</option>`).join("");
   const isSkill = item.kind === "skill";
-  const toggleText = isSkill
+  const isMcp = item.kind === "mcp";
+  // skill 和 MCP 都有“正本 + 本机副本”
+  const hasCopies = item.kind !== "plugin";
+  const toggleText = hasCopies
     ? (item.enabled ? `已启用 · 装在 ${item.copies.length} 处` : item.inCloud ? "已关闭 · 云端保留，随时装回" : "已关闭")
     : (item.enabled ? `已启用 · ${item.version || ""}` : item.installed ? "已安装但未启用" : "未安装 · 云端有记录");
 
   const stateChip = { same: '<span class="chip ok">一致</span>', modified: '<span class="chip warn">有改动</span>', local: '<span class="chip info">仅本机</span>' };
-  const copies = isSkill && item.copies.length ? `<div class="form-row"><label>本机副本</label><div class="copy-list">${item.copies.map((copy) =>
-    `<div class="copy-item"><div class="where"><b>${esc(copy.label)}</b><span title="${esc(copy.dir)}">${esc(copy.dir)}</span></div>
+  const copies = hasCopies && item.copies.length ? `<div class="form-row"><label>${isMcp ? "各 AI 的配置" : "本机副本"}</label><div class="copy-list">${item.copies.map((copy) =>
+    `<div class="copy-item"><div class="where"><b>${esc(copy.label)}${isMcp && copy.name !== item.name ? `<span class="faint">（名字 ${esc(copy.name)}）</span>` : ""}</b><span title="${esc(copy.dir)}">${esc(copy.dir)}</span></div>
       ${copy.legacy ? '<span class="chip warn plain">旧目录</span>' : ""}${stateChip[copy.state] || ""}
-      <button class="btn ghost icon sm" data-act="open" data-path="${esc(copy.dir + "/" + item.id)}" title="打开文件夹">${I.folder}</button></div>`).join("")}</div></div>` : "";
-  const missing = isSkill && item.enabled && item.missing.length
+      <button class="btn ghost icon sm" data-act="open" data-path="${esc(isMcp ? copy.dir : copy.dir + "/" + item.id)}" title="${isMcp ? "打开配置文件所在位置" : "打开文件夹"}">${I.folder}</button></div>`).join("")}</div></div>` : "";
+  const missing = hasCopies && item.enabled && item.missing.length
     ? `<div class="form-row"><label>还没装到</label><div class="readonly">${esc(item.missing.join("、"))}<br>点「同步到所有 AI」补齐。</div></div>` : "";
   const subSkills = !isSkill && item.skills?.length ? `<div class="form-row"><label>包含的 skill（随插件一起开关）</label><div class="copy-list">${item.skills.map((skill) =>
     `<div class="sub-skill"><code>${esc(skill.name)}</code><span>${esc(skill.description)}</span></div>`).join("")}</div></div>` : "";
-  const canUpload = isSkill ? (!item.inCloud || item.modified) : !item.inCloud;
+  const canUpload = hasCopies ? (!item.inCloud || item.modified) : !item.inCloud;
+  const avatar = avatarHtml(item);
+  const spec = item.spec || {};
+  const specRows = isMcp ? (spec.type === "stdio"
+    ? [["命令", spec.command], ["参数", (spec.args || []).join(" ")], ...Object.entries(spec.env || {}).map(([k, v]) => ["环境变量", `${k}=${v}`])]
+    : [["地址", spec.url], ...Object.entries(spec.headers || {}).map(([k, v]) => ["请求头", `${k}: ${v}`])]).filter(([, v]) => v !== "") : [];
+  const specBlock = isMcp ? `<div class="form-row"><label>配置（${spec.type === "stdio" ? "本地命令" : spec.type === "sse" ? "远程 SSE" : "远程 HTTP"}）</label>
+    <div class="spec">${specRows.map(([k, v]) => `<div><span>${esc(k)}</span><code>${esc(v)}</code></div>`).join("")}</div>
+    ${item.secretEnv.length ? `<div class="hint">${I.key}这些像密钥，只把名字存到云端，值留在本机：${esc(item.secretEnv.join("、"))}</div>` : ""}</div>` : "";
 
   inner.innerHTML = `
     <div class="insp-head">
-      <div class="avatar" style="--c:${isSkill ? groupColor(item.group) : "#7C7C86"}">${isSkill ? esc([...title(item)][0].toUpperCase()) : I.puzzle}</div>
-      <div style="min-width:0"><h3>${esc(title(item))}</h3><div class="en">${esc(item.id)}</div></div>
+      <div class="avatar" style="--c:${avatar.color}">${avatar.html}</div>
+      <div style="min-width:0"><h3>${esc(title(item))}</h3><div class="en">${esc(isMcp ? item.name : item.id)}</div></div>
       <button class="btn ghost icon close" data-act="inspect-close" title="关闭（Esc）">${I.x}</button>
     </div>
     <div class="insp-toggle">
@@ -548,15 +653,15 @@ function renderInspector() {
         <span class="track"></span><span class="thumb"></span></label>
     </div>
     <div class="form-row"><label>中文名<span class="saved-tick" data-tick="nameZh">已保存</span></label>
-      <input class="field" data-field="nameZh" value="${esc(item.nameZh)}" placeholder="${esc(item.id)}"></div>
+      <input class="field" data-field="nameZh" value="${esc(item.nameZh)}" placeholder="${esc(isMcp ? item.name : item.id)}"></div>
     <div class="form-row"><label>介绍<span class="saved-tick" data-tick="note">已保存</span></label>
       <textarea class="field" data-field="note" placeholder="一句话说清它是干什么的">${esc(item.note)}</textarea></div>
     <div class="form-row"><label>分组<span class="saved-tick" data-tick="group">已保存</span></label>
       <select class="field" data-field="group">${groups}</select></div>
     ${isSkill && item.description ? `<div class="form-row"><label>原始说明（SKILL.md）</label><div class="readonly">${esc(item.description)}</div></div>` : ""}
-    ${missing}${copies}${subSkills}
+    ${specBlock}${missing}${copies}${subSkills}
     <div class="insp-actions">
-      ${canUpload ? `<button class="btn primary" data-act="upload" data-key="${esc(item.key)}">${I.cloudUp}${isSkill ? (item.inCloud ? "上传改动到云端" : "上传到云端") : "记录到云端清单"}</button>` : ""}
+      ${canUpload ? `<button class="btn primary" data-act="upload" data-key="${esc(item.key)}">${I.cloudUp}${hasCopies ? (item.inCloud ? "上传改动到云端" : "上传到云端") : "记录到云端清单"}</button>` : ""}
       <button class="btn danger" data-act="delete" data-key="${esc(item.key)}">${I.trash}彻底删除…</button>
     </div>`;
 }
@@ -753,6 +858,7 @@ function showResult(result, options = {}) {
  * 执行长操作：顶部显示进度胶囊，不挡住界面；同一时间只允许一个。
  * @param {string} label 进度文本
  * @param {Function} fn 异步操作
+ * @returns {Promise<boolean>} 成功并有结果返回 true
  */
 async function task(label, fn) {
   if (ui.task) {
@@ -765,8 +871,10 @@ async function task(label, fn) {
   try {
     const result = await fn();
     if (result) showResult(result);
+    return Boolean(result);
   } catch (error) {
     toast(error.message, { type: "err" });
+    return false;
   } finally {
     ui.task = "";
     hud.innerHTML = "";
@@ -788,7 +896,8 @@ async function confirmed(path, body, result, { head, action }) {
   const lines = result.needConfirm.split("\n");
   const choice = await confirmAlert({ head, message: lines.join("\n"), action, canUpload: result.canUpload });
   if (choice === "upload") {
-    const item = items.get(`${path.includes("plugin") ? "p" : "s"}:${body.id}`);
+    const prefix = path.startsWith("/api/plugin") ? "p" : path.startsWith("/api/mcp") ? "m" : "s";
+    const item = items.get(`${prefix}:${body.id}`);
     if (item) showResult(await api(`${base(item)}/upload`, { id: item.id }));
     return api(path, body);
   }
@@ -826,7 +935,7 @@ async function toggleItem(item, on, { undoable = true } = {}) {
 
 /** 上传一个条目（插件是记录到云端清单）。 */
 async function uploadItem(item) {
-  await task(item.kind === "skill" ? `上传 ${item.id}` : `记录 ${item.id}`, () => api(`${base(item)}/upload`, { id: item.id }));
+  await task(item.kind === "plugin" ? `记录 ${item.id}` : `上传 ${title(item)}`, () => api(`${base(item)}/upload`, { id: item.id }));
 }
 
 /** 彻底删除一个条目，一定先确认。 */
@@ -1009,7 +1118,7 @@ function menuAt(button, entries) {
 /** 条目的菜单项。 */
 function itemMenu(item) {
   const isSkill = item.kind === "skill";
-  const canUpload = isSkill ? (!item.inCloud || item.modified) : !item.inCloud;
+  const canUpload = item.kind !== "plugin" ? (!item.inCloud || item.modified) : !item.inCloud;
   const groupEntries = [{ heading: "移到分组" }, ...state.groups.map((group) => ({
     label: group.name, icon: `<span class="dot" style="width:9px;height:9px;border-radius:50%;margin:0 2.5px;background:${groupColor(group.id)}"></span>`,
     hint: group.id === item.group ? "✓" : "", run: () => moveToGroup([item.key], group.id) })),
@@ -1017,8 +1126,9 @@ function itemMenu(item) {
   return [
     { label: item.enabled ? "关闭" : "启用", icon: I.power, hint: "空格", run: () => toggleItem(item, !item.enabled) },
     { label: "显示详情", icon: I.pencil, hint: "Enter", run: () => inspect(item.key) },
-    ...(canUpload ? [{ label: isSkill ? "上传到云端" : "记录到云端", icon: I.cloudUp, run: () => uploadItem(item) }] : []),
+    ...(canUpload ? [{ label: item.kind === "plugin" ? "记录到云端" : "上传到云端", icon: I.cloudUp, run: () => uploadItem(item) }] : []),
     ...(isSkill && item.copies[0] ? [{ label: "打开文件夹", icon: I.folder, run: () => openPath(`${item.copies[0].dir}/${item.id}`) }] : []),
+    ...(item.kind === "mcp" && item.copies[0] ? [{ label: "打开配置文件位置", icon: I.folder, run: () => openPath(item.copies[0].dir) }] : []),
     "-", ...groupEntries, "-",
     { label: "彻底删除…", icon: I.trash, danger: true, hint: "Delete", run: () => deleteItem(item) },
   ];
@@ -1073,12 +1183,14 @@ function openPalette() {
     { section: "操作", label: "浏览插件市场", icon: I.bag, run: Actions.market },
     { section: "前往", label: "全部", icon: I.stack, run: () => go("all") },
     { section: "前往", label: "插件", icon: I.puzzle, run: () => go("plugins") },
+    { section: "前往", label: "MCP 工具", icon: I.plug, run: () => go("mcps") },
+    { section: "前往", label: "全局规则", icon: I.doc, run: () => go("rules") },
     { section: "前往", label: "需要处理", icon: I.alert, run: () => go("attention") },
     { section: "前往", label: "AI 应用", icon: I.sparkle, run: () => go("agents") },
     { section: "前往", label: "云端与设置", icon: I.gear, run: () => go("settings") },
     ...state.groups.map((group) => ({ section: "分组", label: group.name, icon: `<span class="dot" style="width:9px;height:9px;border-radius:50%;background:${groupColor(group.id)}"></span>`, run: () => go(`group:${group.id}`) })),
-    ...[...items.values()].map((item) => ({ section: item.kind === "skill" ? "Skill" : "插件", label: title(item), hint: item.id,
-      text: `${item.note} ${item.description}`, icon: item.kind === "skill" ? esc([...title(item)][0].toUpperCase()) : I.puzzle,
+    ...[...items.values()].map((item) => ({ section: { skill: "Skill", plugin: "插件", mcp: "MCP" }[item.kind], label: title(item), hint: item.id,
+      text: `${item.note} ${item.description}`, icon: avatarHtml(item).html,
       run: () => reveal(item.key) })),
   ];
   let list = [], active = 0;
@@ -1091,7 +1203,7 @@ function openPalette() {
     const draw = () => {
       const words = input.value.toLowerCase().split(/\s+/).filter(Boolean);
       list = commands.filter((c) => words.every((w) => `${c.label} ${c.hint || ""} ${c.text || ""} ${c.section}`.toLowerCase().includes(w)));
-      if (!words.length) list = list.filter((c) => c.section !== "Skill" && c.section !== "插件");
+      if (!words.length) list = list.filter((c) => !["Skill", "插件", "MCP"].includes(c.section));
       list = list.slice(0, 60);
       active = Math.min(active, Math.max(list.length - 1, 0));
       let last = "";
@@ -1144,6 +1256,7 @@ function reveal(key) {
   ui.search = "";
   ui.filter = "all";
   if (item.kind === "plugin") ui.view = "plugins";
+  else if (item.kind === "mcp") ui.view = "mcps";
   else if (ui.view !== "all") ui.view = "all";
   ui.collapsed.delete(item.group || "_none");
   inspect(key);
@@ -1398,6 +1511,9 @@ document.addEventListener("click", (event) => {
     case "upload": return uploadItem(item);
     case "delete": return deleteItem(item);
     case "open": return openPath(actor.dataset.path);
+    case "rules-save": return saveRules();
+    case "rules-apply": return applyRules();
+    case "rules-import": return importRules(actor.dataset.path);
     case "batch-on": return batchToggle(true);
     case "batch-off": return batchToggle(false);
     case "batch-upload": return task(`上传 ${ui.selected.size} 项`, async () => {
@@ -1474,6 +1590,13 @@ document.addEventListener("change", (event) => {
 });
 
 document.addEventListener("input", (event) => {
+  if (event.target.id === "rulesText") {
+    ui.rulesDraft = event.target.value;
+    const dirty = ui.rulesDraft !== state.rules.text;
+    document.querySelector('[data-act="rules-save"]')?.toggleAttribute("disabled", !dirty);
+    document.querySelector('[data-act="rules-apply"]')?.toggleAttribute("disabled", dirty || !state.rules.inCloud);
+    return;
+  }
   if (event.target.id !== "search") return;
   ui.search = event.target.value;
   // 搜索时不播放入场动画，保证输入跟手

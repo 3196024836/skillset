@@ -7,6 +7,7 @@
 - 彻底删除 = 库和本机都删。
 - 有可能丢数据的操作（云端没有备份、本机副本有改动），先返回 needConfirm 让界面询问，用户确认后带 force 再调一次。
 - 本机副本和正本不一样时，同步不会覆盖它，只标出来。
+- MCP 工具和全局规则文档的逻辑在 mcp_service.py（混入本类）。
 """
 
 import threading
@@ -18,6 +19,7 @@ import github
 import plugins
 import skillfs
 from library import GitError, Library
+from mcp_service import McpMixin
 from plugins import PluginError
 
 
@@ -34,7 +36,7 @@ def _key(path: Path) -> str:
     return str(path.resolve() if path.exists() else path.absolute()).lower()
 
 
-class SkillService:
+class SkillService(McpMixin):
     """所有界面操作的入口，内部加锁，同一时间只执行一个操作。
 
     例：
@@ -42,6 +44,9 @@ class SkillService:
         state = service.state()
         service.enable("ui-ugui")
     """
+
+    # 混入类里也用这个异常
+    UserError = UserError
 
     def __init__(self):
         """加载配置和库。"""
@@ -126,7 +131,7 @@ class SkillService:
     def state(self) -> dict:
         """生成界面需要的完整状态。
 
-        :returns: {"skills", "groups", "plugins", "agents", "dirs", "git", "config"}
+        :returns: {"skills", "groups", "plugins", "mcps", "rules", "agents", "dirs", "git", "config"}
         """
         with self.lock:
             manifest = self.library.load()
@@ -174,6 +179,7 @@ class SkillService:
 
             return {
                 "skills": skills, "groups": manifest["groups"], "plugins": self._plugin_state(manifest),
+                "mcps": self._mcp_state(manifest), "rules": self._rules_state(),
                 "agents": self.agent_rows(),
                 "dirs": [{"path": str(entry["path"]), "label": entry["label"], "install": entry["install"],
                           "legacy": entry["legacy"], "exists": entry["path"].exists()} for entry in dirs],
@@ -384,14 +390,14 @@ class SkillService:
     def edit(self, kind: str, itemId: str, fields: dict) -> dict:
         """修改中文名、介绍、分组。
 
-        :param kind: "skill" 或 "plugin"
-        :param itemId: skill 英文名或插件 id
+        :param kind: "skill"、"plugin" 或 "mcp"
+        :param itemId: skill 英文名、插件 id 或 MCP id
         :param fields: 要改的字段，只接受 nameZh / note / group
         :returns: 结果
         """
         with self.lock:
             manifest = self.library.load()
-            section = manifest["skills"] if kind == "skill" else manifest["plugins"]
+            section = {"skill": manifest["skills"], "mcp": manifest["mcps"]}.get(kind, manifest["plugins"])
             entry = section.setdefault(itemId, {})
             for key in ("nameZh", "note", "group"):
                 if key in fields:
@@ -417,12 +423,14 @@ class SkillService:
                 message += f"，{len(failed)} 个失败：\n" + "\n\n".join(failed)
             return {"message": message}
 
-    def sync_all(self, baseHashes: dict = None) -> dict:
+    def sync_all(self, baseHashes: dict = None, baseMcps: dict = None) -> dict:
         """一键同步：让所有目标 AI 和云端清单一致。
 
-        启用的装上（缺的补上、没改过的更新），关闭的删掉（只删没改过的），插件按清单安装。
+        启用的装上（缺的补上、没改过的更新），关闭的删掉（只删没改过的），插件按清单安装，
+        MCP 同理；规则文件只给还没有的 AI 写上。
 
         :param baseHashes: 拉取前的正本指纹；这些也算"没改过"
+        :param baseMcps: 拉取前的 MCP 清单记录；和它一样的配置也算"没改过"
         :returns: 结果
         """
         with self.lock:
@@ -444,7 +452,10 @@ class SkillService:
                         skipped.append(str(copy))
 
             pluginMessage = self._sync_plugins(manifest)
-            message = f"同步完成：新装 {installed} 处，删除 {removed} 处。{pluginMessage}"
+            mcpMessage, mcpSkipped = self._sync_mcps(manifest, baseMcps)
+            rulesMessage, rulesSkipped = self._sync_rules()
+            skipped += mcpSkipped + rulesSkipped
+            message = f"同步完成：新装 {installed} 处，删除 {removed} 处。{mcpMessage}{rulesMessage}{pluginMessage}"
             if skipped:
                 message += "\n这些副本有本机改动，没有动：\n" + "\n".join(skipped)
             return {"message": message}
@@ -457,6 +468,7 @@ class SkillService:
         with self.lock:
             baseHashes = {skillId: skillfs.dir_hash(path)
                           for skillId, path in skillfs.list_skills(self.library.skillsDir).items()}
+            baseMcps = self.library.load()["mcps"]
             if self.library.remote_url():
                 try:
                     pullMessage = self.library.pull()
@@ -464,7 +476,7 @@ class SkillService:
                     raise UserError(f"从云端拉取失败：{error}")
             else:
                 pullMessage = "没有设置云端仓库，跳过拉取"
-            result = self.sync_all(baseHashes)
+            result = self.sync_all(baseHashes, baseMcps)
 
             # 更新插件市场和已安装插件
             notes = []
@@ -546,7 +558,7 @@ class SkillService:
         with self.lock:
             manifest = self.library.load()
             manifest["groups"] = [group for group in manifest["groups"] if group["id"] != groupId]
-            for section in (manifest["skills"], manifest["plugins"]):
+            for section in (manifest["skills"], manifest["plugins"], manifest["mcps"]):
                 for entry in section.values():
                     if entry.get("group") == groupId:
                         entry["group"] = ""
@@ -564,18 +576,22 @@ class SkillService:
             state = self.state()
             skillIds = [row["id"] for row in state["skills"] if row["group"] == groupId]
             pluginIds = [row["id"] for row in state["plugins"]["items"] if row["group"] == groupId]
+            mcpIds = [row["id"] for row in state["mcps"]["items"] if row["group"] == groupId]
 
             # 关闭时先汇总所有需要确认的项
             if not enabled and not force:
-                risky = [row["id"] for row in state["skills"]
+                risky = [row["id"] for row in state["skills"] + state["mcps"]["items"]
                          if row["group"] == groupId and (not row["inCloud"] or row["modified"])]
                 if risky:
-                    return {"needConfirm": "这些 skill 云端没有备份或本机有改动，关闭会丢失：\n"
+                    return {"needConfirm": "这些 skill / MCP 云端没有备份或本机有改动，关闭会丢失：\n"
                                            + "\n".join(risky) + "\n\n确定整组关闭吗？"}
 
             messages = []
             for skillId in skillIds:
                 result = self.enable(skillId, force) if enabled else self.disable(skillId, True)
+                messages.append(result.get("needConfirm") or result.get("message", ""))
+            for mcpId in mcpIds:
+                result = self.mcp_enable(mcpId, force) if enabled else self.mcp_disable(mcpId, True)
                 messages.append(result.get("needConfirm") or result.get("message", ""))
             for pluginId in pluginIds:
                 result = self.plugin_enable(pluginId) if enabled else self.plugin_disable(pluginId, True)

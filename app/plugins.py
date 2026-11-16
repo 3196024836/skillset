@@ -27,6 +27,10 @@ def claude_exe() -> str:
     exe = shutil.which("claude")
     if not exe:
         raise PluginError("找不到 claude 命令，请确认 Claude Code 已安装并在 PATH 里")
+    # npm 装的是 .cmd 包装脚本，参数要经过 cmd.exe 转义，JSON 参数会被弄乱；有原生 exe 就直接用
+    native = Path(exe).parent / "node_modules" / "@anthropic-ai" / "claude-code" / "bin" / "claude.exe"
+    if exe.lower().endswith(".cmd") and native.is_file():
+        return str(native)
     return exe
 
 
