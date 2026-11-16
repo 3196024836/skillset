@@ -13,6 +13,7 @@
 import hashlib
 import json
 import threading
+import time
 import uuid
 from pathlib import Path
 
@@ -23,7 +24,11 @@ import plugins
 import skillfs
 from library import GitError, Library
 from mcp_service import McpMixin
+from watcher import Watcher
 from plugins import PluginError
+
+# 指纹最长缓存多久（秒）：万一系统通知漏了，到时间也会重算
+StampMaxAge = 60
 
 
 class UserError(Exception):
@@ -55,6 +60,14 @@ class SkillService(McpMixin):
         """加载配置和库。"""
         # 串行化所有操作，避免两个按钮同时改文件
         self.lock = threading.RLock()
+        # 盯着各 AI 目录的变化，没变时界面问指纹几乎不花时间
+        self.watcher = Watcher()
+        # 上次算的指纹和时间
+        self._stampValue, self._stampAt = "", 0.0
+        # 界面显示用的 skill 内容指纹缓存 {路径: (文件大小和时间的摘要, 指纹)}
+        self._hashCache = {}
+        # 已装插件列表缓存 (Claude 插件记录的状态, 列表)
+        self._pluginCache = None
         self.reload()
 
     def reload(self) -> None:
@@ -69,6 +82,7 @@ class SkillService(McpMixin):
             # 库
             self.library = Library(Path(self.config["libraryPath"]))
             self.library.ensure()
+            self._stampValue = ""
 
     # ------------------------------------------------------------------ 目录
 
@@ -131,24 +145,58 @@ class SkillService(McpMixin):
 
     # ------------------------------------------------------------------ 状态
 
+    def _watched_files(self) -> list:
+        """除 skill 文件夹外，变了也要提醒的单个文件：清单、插件记录、规则文件、各 AI 的 MCP 配置。
+
+        :returns: [Path]
+        """
+        return ([self.library.manifestPath, plugins.installed_record(), plugins.settings_path()]
+                + [entry["path"] for entry in self._rules_targets()]
+                + [target.path for target in self._mcp_targets()])
+
+    def _watch_roots(self, skillRoots: list, files: list) -> list:
+        """要让系统盯着的文件夹：skill 目录连子文件夹一起，单个文件只盯它所在的文件夹。
+        还不存在的就盯最近一层存在的上级，它被建出来时也能发现。
+
+        :param skillRoots: skill 根目录
+        :param files: 单个文件
+        :returns: [(Path, 是否含子文件夹)]
+        """
+        roots = []
+        for path, recursive in [(root, True) for root in skillRoots] + [(file.parent, False) for file in files]:
+            while not path.is_dir() and path.parent != path:
+                path, recursive = path.parent, False
+            roots.append((path, recursive))
+        return roots
+
     def stamp(self) -> str:
         """本机和库里相关文件的轻量指纹；变了说明外面有改动（比如 AI 新建、更新了 skill）。
 
-        skill 只看文件名、大小和修改时间，不读内容，界面可以每隔几秒问一次。
-        MCP 按解析后的内容算，因为 ~/.claude.json 平时也会被 Claude Code 频繁改写。
+        系统通知说没变时直接返回上次的结果，几乎不花时间；变了才重新算（约 0.1 秒）：
+        skill 只看文件名、大小和修改时间，不读内容；MCP 按解析后的内容算，
+        因为 ~/.claude.json 平时也会被 Claude Code 频繁改写。
+        万一系统通知漏了，最多 60 秒也会重算一次。
 
         :returns: 短十六进制字符串
         """
+        if self._stampValue and time.monotonic() - self._stampAt < StampMaxAge and not self.watcher.take():
+            return self._stampValue
+        skillRoots = [self.library.skillsDir] + [entry["path"] for entry in self._dirs()]
+        files = self._watched_files()
+        # 先开始监视再计算，计算途中的改动下次还能发现
+        self.watcher.watch(self._watch_roots(skillRoots, files))
         digest = hashlib.sha256()
 
         def add(text: str) -> None:
             digest.update(text.encode("utf-8", "surrogateescape") + b"\0")
 
-        for root in [self.library.skillsDir] + [entry["path"] for entry in self._dirs()]:
+        for root in skillRoots:
             for path in skillfs.list_skills(root).values():
                 add(f"{path}\n{skillfs.dir_stamp(path)}")
-        files = [self.library.manifestPath, plugins.installed_record()] + [entry["path"] for entry in self._rules_targets()]
+        mcpFiles = {str(target.path) for target in self._mcp_targets()}
         for path in files:
+            if str(path) in mcpFiles:
+                continue
             info = path.stat() if path.is_file() else None
             add(f"{path}|{info.st_size}|{info.st_mtime_ns}" if info else str(path))
         for target in self._mcp_targets():
@@ -157,20 +205,38 @@ class SkillService(McpMixin):
             except mcp.McpError as error:
                 servers = str(error)
             add(json.dumps([target.agentId, servers], sort_keys=True, default=str))
-        return digest.hexdigest()[:16]
+        self._stampValue, self._stampAt = digest.hexdigest()[:16], time.monotonic()
+        return self._stampValue
+
+    def _quick_hash(self, path: Path, cache: dict) -> str:
+        """界面显示用的内容指纹：文件名、大小、修改时间都没变就用上次算的，不再读文件内容。
+        会删改文件的操作仍然直接用 skillfs.dir_hash，不走这个缓存。
+
+        :param path: skill 文件夹
+        :param cache: 本次用到的缓存，算完后替换旧缓存（顺带丢掉已经不存在的文件夹）
+        :returns: 内容指纹
+        """
+        key = hashlib.sha1(skillfs.dir_stamp(path).encode("utf-8", "surrogateescape")).digest()
+        cached = self._hashCache.get(str(path))
+        value = cached[1] if cached and cached[0] == key else skillfs.dir_hash(path)
+        cache[str(path)] = (key, value)
+        return value
 
     def state(self) -> dict:
         """生成界面需要的完整状态。
 
         :returns: {"stamp", "skills", "groups", "plugins", "mcps", "rules", "agents", "dirs", "git", "config"}
         """
+        # 重新扫描时指纹也重算（顺带更新监视的文件夹，比如刚勾选了新的 AI）；
         # 先取指纹再扫描：扫描途中发生的改动，下次比对时还能发现
+        self._stampValue = ""
         stamp = self.stamp()
         with self.lock:
             manifest = self.library.load()
             dirs = self._dirs()
+            hashCache = {}
             librarySkills = skillfs.list_skills(self.library.skillsDir)
-            libraryHashes = {skillId: skillfs.dir_hash(path) for skillId, path in librarySkills.items()}
+            libraryHashes = {skillId: self._quick_hash(path, hashCache) for skillId, path in librarySkills.items()}
 
             # 收集每个 skill 在本机的所有副本
             copies = {}
@@ -186,8 +252,8 @@ class SkillService(McpMixin):
                 metaSource = librarySkills.get(skillId) or copies[skillId][0][1]
                 copyRows = []
                 for entry, path in copies.get(skillId, []):
-                    copyHash = skillfs.dir_hash(path)
-                    status = "local" if not inCloud else ("same" if copyHash == libraryHashes[skillId] else "modified")
+                    status = "local" if not inCloud else (
+                        "same" if self._quick_hash(path, hashCache) == libraryHashes[skillId] else "modified")
                     copyRows.append({"dir": str(entry["path"]), "label": entry["label"], "state": status,
                                      "install": entry["install"], "legacy": entry["legacy"], "twin": entry["twin"]})
                 enabled = info.get("enabled", False) if inCloud else True
@@ -203,6 +269,8 @@ class SkillService(McpMixin):
                     "modified": any(row["state"] == "modified" for row in copyRows),
                     "duplicate": duplicate,
                 })
+
+            self._hashCache = hashCache
 
             # git 状态失败不影响其他内容显示
             try:
@@ -228,10 +296,15 @@ class SkillService(McpMixin):
         :param manifest: 清单
         :returns: {"items": [...], "available": [...], "error": str}
         """
-        try:
-            installed = {plugin["id"]: plugin for plugin in plugins.list_installed()}
-        except (PluginError, OSError, ValueError) as error:
-            return {"items": [], "available": [], "error": str(error)}
+        # `claude plugin list` 要启动一个 claude 进程（约 1 秒）；Claude 的插件记录没变就用上次的结果
+        key = plugins.record_key()
+        if not self._pluginCache or self._pluginCache[0] != key:
+            try:
+                self._pluginCache = (key, plugins.list_installed())
+            except (PluginError, OSError, ValueError) as error:
+                self._pluginCache = None
+                return {"items": [], "available": [], "error": str(error)}
+        installed = {plugin["id"]: plugin for plugin in self._pluginCache[1]}
 
         items = []
         for pluginId in sorted(set(installed) | set(manifest["plugins"])):

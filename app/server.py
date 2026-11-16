@@ -26,6 +26,14 @@ from service import SkillService, UserError  # noqa: E402
 
 # 静态页面目录
 WebDir = Path(__file__).resolve().parent / "web"
+# 应用窗口只显示本机页面：关掉扩展、同步、后台联网、崩溃上报和多余的渲染进程，
+# 实测进程从 11 个降到 7 个、私有内存少约 40MB
+LeanWindowFlags = [
+    "--disable-features=Translate,OptimizationHints,MediaRouter,AutofillServerCommunication",
+    "--disable-extensions", "--disable-component-extensions-with-background-pages",
+    "--disable-background-networking", "--disable-sync", "--disable-default-apps", "--no-pings",
+    "--disable-breakpad", "--disable-crash-reporter", "--renderer-process-limit=1",
+]
 # 静态文件类型
 ContentTypes = {".html": "text/html; charset=utf-8", ".js": "text/javascript; charset=utf-8",
                 ".css": "text/css; charset=utf-8", ".svg": "image/svg+xml", ".png": "image/png",
@@ -221,7 +229,7 @@ def run_window(url: str, server: ThreadingHTTPServer) -> None:
         return
     profile = data_dir() / "window-profile"
     window = subprocess.Popen([exe, f"--app={url}", f"--user-data-dir={profile}", "--window-size=1320,880",
-                               "--no-first-run", "--no-default-browser-check", "--disable-features=Translate"])
+                               "--no-first-run", "--no-default-browser-check", *LeanWindowFlags])
     window.wait()
     server.shutdown()
 

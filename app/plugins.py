@@ -62,14 +62,44 @@ def run_json(*args: str):
     return json.loads(output)
 
 
+def config_root() -> Path:
+    """Claude Code 的配置目录（~/.claude，可被 CLAUDE_CONFIG_DIR 改掉）。
+
+    :returns: 路径
+    """
+    override = os.environ.get("CLAUDE_CONFIG_DIR")
+    return Path(override) if override else cfg.home_dir() / ".claude"
+
+
 def installed_record() -> Path:
     """Claude Code 记录已装插件的文件，插件装卸、更新后它会变。
 
     :returns: 路径（可能不存在）
     """
-    override = os.environ.get("CLAUDE_CONFIG_DIR")
-    root = Path(override) if override else cfg.home_dir() / ".claude"
-    return root / "plugins" / "installed_plugins.json"
+    return config_root() / "plugins" / "installed_plugins.json"
+
+
+def settings_path() -> Path:
+    """Claude Code 用户设置文件，插件启用、停用记在这里。
+
+    :returns: 路径（可能不存在）
+    """
+    return config_root() / "settings.json"
+
+
+def record_key() -> tuple:
+    """插件记录和设置文件的大小、修改时间；没变说明已装插件列表没变。
+
+    :returns: 可比较的元组
+    """
+    key = []
+    for path in (installed_record(), settings_path()):
+        try:
+            info = path.stat()
+            key.append((info.st_size, info.st_mtime_ns))
+        except OSError:
+            key.append(None)
+    return tuple(key)
 
 
 def list_installed() -> list:

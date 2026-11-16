@@ -176,11 +176,16 @@ async function refresh(notify = false) {
 
 // ============================================================ 发现外部改动
 
-/** 每隔几秒问一次后端指纹，变了就重新扫描。界面在后台时浏览器会自动放慢。 */
+/**
+ * 问后端指纹，变了就重新扫描。后端靠系统通知知道有没有变，没变时这一问几乎不花时间。
+ * 窗口最小化或被挡住时放慢到每分钟一次，只为更新任务栏标题里的数量。
+ */
 async function watchChanges() {
   // 正在执行操作、开着对话框或菜单、或正在输入时不打断
   const typing = document.activeElement?.matches?.("input, textarea, select");
   if (!state || ui.task || ui.watching || typing || document.querySelector("dialog[open], .menu")) return;
+  if (document.hidden && Date.now() - (ui.watchedAt || 0) < 60000) return;
+  ui.watchedAt = Date.now();
   ui.watching = true;
   try {
     const { stamp } = await api("/api/stamp");
@@ -1838,7 +1843,7 @@ document.getElementById("inspector").addEventListener("focusout", (event) => {
 
 // ============================================================ 启动
 
-// 切回窗口时马上检查一次，平时每 5 秒检查一次（一次约 0.1 秒，只看文件大小和时间）
+// 切回窗口时马上检查一次，平时每 5 秒问一次
 addEventListener("focus", watchChanges);
 document.addEventListener("visibilitychange", () => {
   if (document.hidden) return;

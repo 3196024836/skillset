@@ -10,6 +10,7 @@ import os
 import shutil
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 # 测试工作目录（放在下载目录，跑完可删）
@@ -115,13 +116,15 @@ def main() -> None:
     service.disable("leaky", True)
 
     # 本机改动：指纹变化（界面靠它自动发现）；关闭时询问；上传后其他副本同步
-    stamp = service.stamp()
-    check(service.stamp() == stamp and service.state()["stamp"] == stamp, "没有改动时指纹不变")
+    stamp = service.state()["stamp"]
+    check(service.stamp() == stamp, "没有改动时指纹不变")
+    if sys.platform == "win32":
+        check(not service.watcher.fallback and len(service.watcher.roots) > 3, "用系统通知盯着各 AI 目录")
     (home / ".claude/skills/alpha/SKILL.md").write_text("---\nname: alpha\ndescription: changed\n---\nv2\n", encoding="utf-8")
-    check(service.stamp() != stamp, "外面改了 skill，指纹跟着变")
+    check(stamp_changed(service, stamp), "外面改了 skill，指纹跟着变")
     stamp = service.stamp()
     write_skill(home / ".agents/skills", "gamma")
-    check(service.stamp() != stamp, "外面新建了 skill，指纹跟着变")
+    check(stamp_changed(service, stamp), "外面新建了 skill，指纹跟着变")
     shutil.rmtree(home / ".agents/skills/gamma")
     check(row(service, "alpha")["modified"], "本机改动被识别")
     check("needConfirm" in service.disable("alpha"), "有改动时关闭会先询问")
@@ -188,6 +191,20 @@ def main() -> None:
     if testPlugins:
         test_plugins(fresh)
     print("全部通过")
+
+
+def stamp_changed(service, old: str) -> bool:
+    """系统通知是异步的，最多等 3 秒看指纹变没变。
+
+    :param service: SkillService
+    :param old: 原来的指纹
+    :returns: 变了返回 True
+    """
+    for _ in range(30):
+        if service.stamp() != old:
+            return True
+        time.sleep(0.1)
+    return False
 
 
 def fake_claude_mcp() -> None:
