@@ -46,6 +46,7 @@ def route(path: str, body: dict) -> dict:
     itemId = body.get("id", "")
     routes = {
         "/api/state": lambda: service.state(),
+        "/api/stamp": lambda: {"stamp": service.stamp()},
         "/api/reload": lambda: (service.reload(), service.state())[1],
         "/api/skill/enable": lambda: service.enable(itemId, force),
         "/api/skill/disable": lambda: service.disable(itemId, force),

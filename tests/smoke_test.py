@@ -114,8 +114,15 @@ def main() -> None:
         check("密钥" in str(error) and "aaaa" not in str(error), "含密钥被拦下，且不回显密钥")
     service.disable("leaky", True)
 
-    # 本机改动：关闭时询问；上传后其他副本同步
+    # 本机改动：指纹变化（界面靠它自动发现）；关闭时询问；上传后其他副本同步
+    stamp = service.stamp()
+    check(service.stamp() == stamp and service.state()["stamp"] == stamp, "没有改动时指纹不变")
     (home / ".claude/skills/alpha/SKILL.md").write_text("---\nname: alpha\ndescription: changed\n---\nv2\n", encoding="utf-8")
+    check(service.stamp() != stamp, "外面改了 skill，指纹跟着变")
+    stamp = service.stamp()
+    write_skill(home / ".agents/skills", "gamma")
+    check(service.stamp() != stamp, "外面新建了 skill，指纹跟着变")
+    shutil.rmtree(home / ".agents/skills/gamma")
     check(row(service, "alpha")["modified"], "本机改动被识别")
     check("needConfirm" in service.disable("alpha"), "有改动时关闭会先询问")
     service.upload("alpha")

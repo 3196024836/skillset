@@ -132,6 +132,35 @@ def dir_hash(root: Path) -> str:
     return digest.hexdigest()
 
 
+def dir_stamp(root: Path) -> str:
+    """文件夹的轻量指纹：只看文件名、大小、修改时间，不读内容，用来快速发现改动。
+
+    用 os.scandir 直接拿目录项里的大小和时间（Windows 上不用再逐个 stat），界面每几秒调一次也不费劲。
+
+    :param root: skill 文件夹
+    :returns: 每个文件一行的文本
+    """
+    lines = []
+    pending = [str(root)]
+    while pending:
+        try:
+            entries = sorted(os.scandir(pending.pop()), key=lambda entry: entry.name)
+        except OSError:
+            continue
+        for entry in entries:
+            if entry.name in SkipNames:
+                continue
+            try:
+                if entry.is_dir():
+                    pending.append(entry.path)
+                    continue
+                info = entry.stat()
+            except OSError:
+                continue
+            lines.append(f"{entry.path}|{info.st_size}|{info.st_mtime_ns}")
+    return "\n".join(lines)
+
+
 def newest_mtime(root: Path) -> float:
     """返回文件夹里最新文件的修改时间，用来挑"最近改过的那份"。
 

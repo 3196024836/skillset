@@ -10,12 +10,15 @@
 - MCP 工具和全局规则文档的逻辑在 mcp_service.py（混入本类）。
 """
 
+import hashlib
+import json
 import threading
 import uuid
 from pathlib import Path
 
 import config as cfg
 import github
+import mcp
 import plugins
 import skillfs
 from library import GitError, Library
@@ -128,11 +131,41 @@ class SkillService(McpMixin):
 
     # ------------------------------------------------------------------ 状态
 
+    def stamp(self) -> str:
+        """本机和库里相关文件的轻量指纹；变了说明外面有改动（比如 AI 新建、更新了 skill）。
+
+        skill 只看文件名、大小和修改时间，不读内容，界面可以每隔几秒问一次。
+        MCP 按解析后的内容算，因为 ~/.claude.json 平时也会被 Claude Code 频繁改写。
+
+        :returns: 短十六进制字符串
+        """
+        digest = hashlib.sha256()
+
+        def add(text: str) -> None:
+            digest.update(text.encode("utf-8", "surrogateescape") + b"\0")
+
+        for root in [self.library.skillsDir] + [entry["path"] for entry in self._dirs()]:
+            for path in skillfs.list_skills(root).values():
+                add(f"{path}\n{skillfs.dir_stamp(path)}")
+        files = [self.library.manifestPath, plugins.installed_record()] + [entry["path"] for entry in self._rules_targets()]
+        for path in files:
+            info = path.stat() if path.is_file() else None
+            add(f"{path}|{info.st_size}|{info.st_mtime_ns}" if info else str(path))
+        for target in self._mcp_targets():
+            try:
+                servers = target.read()
+            except mcp.McpError as error:
+                servers = str(error)
+            add(json.dumps([target.agentId, servers], sort_keys=True, default=str))
+        return digest.hexdigest()[:16]
+
     def state(self) -> dict:
         """生成界面需要的完整状态。
 
-        :returns: {"skills", "groups", "plugins", "mcps", "rules", "agents", "dirs", "git", "config"}
+        :returns: {"stamp", "skills", "groups", "plugins", "mcps", "rules", "agents", "dirs", "git", "config"}
         """
+        # 先取指纹再扫描：扫描途中发生的改动，下次比对时还能发现
+        stamp = self.stamp()
         with self.lock:
             manifest = self.library.load()
             dirs = self._dirs()
@@ -178,7 +211,7 @@ class SkillService(McpMixin):
                 gitInfo = {"error": str(error)}
 
             return {
-                "skills": skills, "groups": manifest["groups"], "plugins": self._plugin_state(manifest),
+                "stamp": stamp, "skills": skills, "groups": manifest["groups"], "plugins": self._plugin_state(manifest),
                 "mcps": self._mcp_state(manifest), "rules": self._rules_state(),
                 "agents": self.agent_rows(),
                 "dirs": [{"path": str(entry["path"]), "label": entry["label"], "install": entry["install"],

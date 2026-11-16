@@ -5,10 +5,12 @@ Claude Code 插件管理：一律通过官方 `claude plugin ...` 命令操作�
 """
 
 import json
+import os
 import shutil
 import subprocess
 from pathlib import Path
 
+import config as cfg
 from skillfs import list_skills, read_meta
 
 # 插件命令超时（秒），安装可能要下载
@@ -58,6 +60,16 @@ def run_json(*args: str):
     if not output.startswith(("[", "{")):
         output = output.splitlines()[-1] if output else "null"
     return json.loads(output)
+
+
+def installed_record() -> Path:
+    """Claude Code 记录已装插件的文件，插件装卸、更新后它会变。
+
+    :returns: 路径（可能不存在）
+    """
+    override = os.environ.get("CLAUDE_CONFIG_DIR")
+    root = Path(override) if override else cfg.home_dir() / ".claude"
+    return root / "plugins" / "installed_plugins.json"
 
 
 def list_installed() -> list:

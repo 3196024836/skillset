@@ -78,6 +78,7 @@ const ui = {
   renderedView: "",            // 上次渲染的视图，用来决定是否播放入场动画
   task: "",                    // 正在执行的长操作
   rulesDraft: null,            // 全局规则编辑中但还没保存的文本
+  notice: new Set(),           // 外面新出现、还没提醒过的待上传条目 key
 };
 // 后端状态
 let state = null;
@@ -99,6 +100,11 @@ async function api(path, body = {}) {
   const data = await response.json().catch(() => ({ error: `请求失败 ${response.status}` }));
   if (!response.ok) throw new Error(data.error || `请求失败 ${response.status}`);
   return data;
+}
+
+/** 是否需要上传：云端还没有，或本机改过。 */
+function needsUpload(item) {
+  return !item.inCloud || (item.kind !== "plugin" && item.modified);
 }
 
 /** 是否需要用户处理：没上传、有改动、没装全、旧目录重复。 */
@@ -138,14 +144,19 @@ function rulesPending() {
 
 // ============================================================ 加载
 
-/** 重新拉取状态并刷新界面。 */
-async function refresh() {
+/**
+ * 重新拉取状态并刷新界面。
+ * @param {boolean} notify 是否提醒新出现的待上传条目（只有自动发现外部改动时才提醒）
+ */
+async function refresh(notify = false) {
   try {
     state = await api("/api/state");
   } catch (error) {
     toast(`读取状态失败：${error.message}`, { type: "err" });
     return;
   }
+  const before = new Set([...items.values()].filter(needsUpload).map((item) => item.key));
+  const first = items.size === 0;
   items = new Map();
   for (const skill of state.skills) items.set(`s:${skill.id}`, { ...skill, kind: "skill", key: `s:${skill.id}` });
   for (const plugin of state.plugins.items) {
@@ -155,7 +166,49 @@ async function refresh() {
   // 清掉已经不存在的选择
   for (const key of [...ui.selected]) if (!items.has(key)) ui.selected.delete(key);
   if (ui.inspect && !items.has(ui.inspect)) ui.inspect = "";
+  // 自己点的操作不提醒；外面（比如 AI）新建或改了的才提醒
+  if (notify && !first) {
+    for (const item of items.values()) if (needsUpload(item) && !before.has(item.key)) ui.notice.add(item.key);
+  }
   render();
+  showNotice();
+}
+
+// ============================================================ 发现外部改动
+
+/** 每隔几秒问一次后端指纹，变了就重新扫描。界面在后台时浏览器会自动放慢。 */
+async function watchChanges() {
+  // 正在执行操作、开着对话框或菜单、或正在输入时不打断
+  const typing = document.activeElement?.matches?.("input, textarea, select");
+  if (!state || ui.task || ui.watching || typing || document.querySelector("dialog[open], .menu")) return;
+  ui.watching = true;
+  try {
+    const { stamp } = await api("/api/stamp");
+    if (stamp !== state.stamp && !ui.task) await refresh(true);
+  } catch {
+    // 服务暂时没响应时下次再试
+  } finally {
+    ui.watching = false;
+  }
+}
+
+/** 界面在前台时，把新出现的待上传条目提醒出来，带一键上传。 */
+function showNotice() {
+  for (const key of [...ui.notice]) if (!items.get(key) || !needsUpload(items.get(key))) ui.notice.delete(key);
+  if (document.hidden || !ui.notice.size) return;
+  const keys = [...ui.notice];
+  ui.notice.clear();
+  const names = keys.slice(0, 3).map((key) => title(items.get(key))).join("、") + (keys.length > 3 ? ` 等 ${keys.length} 项` : "");
+  toast(`发现新改动，还没上传：${names}`, {
+    type: "warn", action: "上传", duration: 15000,
+    onAction: () => task(`上传 ${keys.length} 项`, async () => {
+      for (const key of keys) {
+        const item = items.get(key);
+        if (item && needsUpload(item)) await api(`${base(item)}/upload`, { id: item.id });
+      }
+      return { message: `已上传 ${keys.length} 项` };
+    }),
+  });
 }
 
 /** 首次加载时显示骨架屏。 */
@@ -204,6 +257,8 @@ function renderNav() {
   const all = [...items.values()];
   const count = (fn) => all.filter(fn).length;
   const attention = count(needsAttention);
+  // 任务栏标题带上待处理数量，窗口在后台也能看到
+  document.title = attention ? `(${attention}) Skillset` : "Skillset";
   const navItem = (view, icon, name, n, extra = "") => `
     <div class="nav-item ${ui.view === view ? "active" : ""}" data-view="${esc(view)}" ${extra} role="button" tabindex="0">
       ${icon}<span class="name">${esc(name)}</span><span class="count">${n ?? ""}</span></div>`;
@@ -1782,6 +1837,15 @@ document.getElementById("inspector").addEventListener("focusout", (event) => {
 });
 
 // ============================================================ 启动
+
+// 切回窗口时马上检查一次，平时每 5 秒检查一次（一次约 0.1 秒，只看文件大小和时间）
+addEventListener("focus", watchChanges);
+document.addEventListener("visibilitychange", () => {
+  if (document.hidden) return;
+  watchChanges();
+  showNotice();
+});
+setInterval(watchChanges, 5000);
 
 renderSkeleton();
 refresh().then(() => {
