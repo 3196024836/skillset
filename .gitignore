@@ -1,0 +1,6 @@
+# 本机配置和 skill 库（库是单独的 git 仓库，推到你自己的私有仓库）
+data/
+library/
+__pycache__/
+*.pyc
+.env

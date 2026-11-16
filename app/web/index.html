@@ -1,0 +1,37 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light dark">
+  <title>Skillset</title>
+  <link rel="icon" href="icon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <div id="app" class="app">
+    <aside class="sidebar">
+      <div class="brand">
+        <img src="icon.svg" alt="">
+        <div><b>Skillset</b><span>AI 技能管家</span></div>
+      </div>
+      <nav id="nav" class="nav" aria-label="导航"></nav>
+      <div id="cloudCard" class="cloud off" role="button" tabindex="0" title="云端设置"></div>
+    </aside>
+
+    <main class="main">
+      <header id="toolbar" class="toolbar"></header>
+      <div id="subbar" class="subbar"></div>
+      <div id="content" class="content" tabindex="-1"></div>
+    </main>
+
+    <aside id="inspector" class="inspector" aria-label="详情"><div id="inspectorInner" class="inspector-inner"></div></aside>
+  </div>
+
+  <div id="batch"></div>
+  <div id="toasts" class="toasts" aria-live="polite"></div>
+  <div id="hud"></div>
+
+  <script src="app.js"></script>
+</body>
+</html>
