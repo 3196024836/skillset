@@ -364,6 +364,8 @@ function renderContent() {
           <span class="dot" style="background:${section.color}"></span>
           <h2>${esc(section.name)}</h2>
           <span class="meta">${section.entries.length} 项${on < section.entries.length ? ` · 启用 ${on}` : ""}</span>
+          ${section.id ? `<button class="note ${section.note ? "" : "empty"}" data-act="group-edit" data-id="${esc(section.id)}"
+            title="${section.note ? esc(section.note) + "（点击编辑）" : "添加说明"}">${esc(section.note || "添加说明")}</button>` : ""}
           ${section.id ? `<div class="acts"><label class="switch small ${on && on < section.entries.length ? "partial" : ""}" title="整组启用或关闭">
             <input type="checkbox" data-act="group-toggle" data-id="${esc(section.id)}" ${on ? "checked" : ""}>
             <span class="track"></span><span class="thumb"></span></label>
@@ -1382,6 +1384,7 @@ document.addEventListener("click", (event) => {
   switch (act) {
     case "row-menu": return menuAt(actor, itemMenu(item));
     case "group-menu": return menuAt(actor, groupMenu(actor.dataset.id));
+    case "group-edit": return editGroup(actor.dataset.id);
     case "app-menu": return menuAt(actor, appMenu());
     case "group-add": return Actions.groupAdd();
     case "collapse": {
