@@ -148,6 +148,8 @@ def main() -> None:
     service.group_toggle(groupId, True)
     check(row(service, "alpha")["enabled"] and row(service, "alpha")["nameZh"] == "阿尔法", "整组启用，中文名保留")
     test_mcp_rules(service, home, UserError)
+    test_keys(service)
+    test_updater()
     service.push()
 
     # 换新电脑：新主目录 + 同一个远程，一键更新后全部装好
@@ -323,6 +325,120 @@ def test_mcp_rules(service, home: Path, UserError) -> None:
     service.rules_apply(True)
     check((home / ".codex/AGENTS.md").read_bytes() == b"# rules A\n", "应用后 Codex 规则和正本一致")
     check(list((WorkDir / "data/backups").glob("*-rules-AGENTS.md")), "覆盖规则前做了备份")
+
+
+def test_keys(service) -> None:
+    """密钥：保存、遮挡、加密落盘、命令行注入与自动换 key、备份、CSV 导入。"""
+    from keystore import KeyStoreError
+    bad, good = "sk-test-BAD-0000001111", "sk-test-GOOD-222223333"
+    oldStamp = service.stamp()
+    service.keys_save({"name": "Demo", "note": "测试", "env": "DEMO_KEY", "keys": [{"value": bad}, {"value": good, "label": "备用"}]})
+    entry = service.keys_list()["entries"][0]
+    check(entry["keys"][0]["masked"] == "••••1111" and "value" not in entry["keys"][0], "列表只露末 4 位")
+    raw = service.keys.path.read_bytes()
+    check(raw.startswith(b"SKK1") and bad.encode() not in raw, "密钥文件是加密的")
+    check(stamp_changed(service, oldStamp), "密钥改动会被发现")
+    check(service.state()["keys"] == {"count": 1, "failed": 0, "error": ""}, "状态里只有数量")
+    check(service.keys_reveal(entry["id"], entry["keys"][1]["id"])["value"] == good, "显示明文")
+
+    # 改顺序、改备注：只传 id 不传值，值保持不变
+    service.keys_save({"id": entry["id"], "name": "Demo", "env": "DEMO_KEY",
+                       "keys": [{"id": entry["keys"][1]["id"], "label": "改了"}, {"id": entry["keys"][0]["id"]}]})
+    again = service.keys_list()["entries"][0]
+    check(again["keys"][0]["label"] == "改了" and service.keys_reveal(entry["id"], again["keys"][0]["id"])["value"] == good,
+          "调整顺序不丢值")
+    service.keys_save({"id": entry["id"], "name": "Demo", "env": "DEMO_KEY",
+                       "keys": [{"id": entry["keys"][0]["id"]}, {"id": entry["keys"][1]["id"]}]})
+    try:
+        service.keys_save({"name": "demo", "keys": [{"value": "x"}]})
+        check(False, "重名要拒绝")
+    except KeyStoreError:
+        check(True, "重名要拒绝")
+
+    # 命令行：第一个 key 认证失败，自动标失效、换第二个重跑；输出里的 key 被隐藏
+    script = WorkDir / "fake_api.py"
+    script.write_text("import os, sys\nkey = os.environ['DEMO_KEY']\nprint('key=' + key)\n"
+                      f"sys.exit(print('401 Unauthorized', file=sys.stderr) or 1) if key == {bad!r} else print('ok')\n",
+                      encoding="utf-8")
+    utf8 = {**os.environ, "PYTHONIOENCODING": "utf-8"}
+    done = subprocess.run([sys.executable, str(AppDir / "keycli.py"), "run", "Demo", "--", sys.executable, str(script)],
+                          capture_output=True, text=True, encoding="utf-8", errors="replace", env=utf8)
+    output = done.stdout + done.stderr
+    check(done.returncode == 0 and "ok" in done.stdout, "认证失败自动换下一个 key")
+    check(bad not in output and good not in output and "key=***" in done.stdout, "命令行输出不露明文")
+    marked = service.keys_list()["entries"][0]
+    check(marked["keys"][0]["status"] == "failed" and "401" in marked["keys"][0]["reason"]
+          and marked["activeId"] == marked["keys"][1]["id"], "失效的 key 标出来并记下原因")
+    check(service.state()["keys"]["failed"] == 1, "侧栏能看到有失效的")
+    listed = subprocess.run([sys.executable, str(AppDir / "keycli.py"), "list"], capture_output=True, text=True,
+                            encoding="utf-8", errors="replace", env=utf8).stdout
+    check("Demo" in listed and "失效 1" in listed and good not in listed, "命令行列表不含明文")
+    service.keys_mark(entry["id"], marked["keys"][0]["id"], False, "")
+    check(service.keys_list()["entries"][0]["activeId"] == marked["keys"][0]["id"], "恢复后重新排在前面")
+
+    # 备份：密码不对要拒绝；导回同名的跳过
+    backupPath = Path(service.keys_export("password-123")["path"])
+    check(backupPath.is_file() and good not in backupPath.read_text(encoding="utf-8"), "导出的备份是加密的")
+    try:
+        service.keys_import_backup(backupPath.read_text(encoding="utf-8"), "wrong-pass")
+        check(False, "备份密码不对要拒绝")
+    except KeyStoreError:
+        check(True, "备份密码不对要拒绝")
+    service.keys_delete(entry["id"], True)
+    service.keys_import_backup(backupPath.read_text(encoding="utf-8"), "password-123")
+    restored = service.keys_list()["entries"]
+    check(len(restored) == 1 and len(restored[0]["keys"]) == 2, "从备份恢复")
+    backupPath.unlink()
+
+    # KeePassXC CSV：跳过模板和空密码
+    csvText = ('"Group","Title","Username","Password","URL","Notes"\n'
+               '"Root/API Keys","示例 - 复制我来新建","","x","",""\n'
+               '"Root/API Keys","OpenAI","me","sk-openai-123456","","个人项目"\n'
+               '"Root/API Keys","Empty","","","",""\n'
+               '"Root","Demo","","dup-value-1","",""\n')
+    result = service.keys_import_csv(csvText)
+    names = [item["name"] for item in service.keys_list()["entries"]]
+    check(names == ["Demo", "OpenAI"] and "跳过 1 条" in result["message"], "导入 KeePassXC CSV")
+    check(service.keys_delete(entry["id"], False).get("needConfirm"), "删除前要确认")
+
+
+def test_updater() -> None:
+    """软件更新：发现落后、只快进拉取、有本机改动时拒绝。"""
+    from updater import Updater, UpdateError
+    upstream, dev, install = WorkDir / "app-upstream.git", WorkDir / "app-dev", WorkDir / "app-install"
+    git = lambda *args, cwd=None: subprocess.run(["git", *args], cwd=cwd, check=True, capture_output=True)  # noqa: E731
+    git("init", "--bare", "-b", "main", str(upstream))
+    git("clone", str(upstream), str(dev))
+    for repo in (dev,):
+        git("config", "user.email", "t@t", cwd=repo)
+        git("config", "user.name", "t", cwd=repo)
+    (dev / "a.txt").write_text("1", encoding="utf-8")
+    git("add", ".", cwd=dev)
+    git("commit", "-m", "第一版", cwd=dev)
+    git("push", "origin", "main", cwd=dev)
+    git("clone", str(upstream), str(install))
+    updater = Updater(install)
+    check(updater.check()["behind"] == 0, "已是最新")
+    (dev / "a.txt").write_text("2", encoding="utf-8")
+    git("commit", "-am", "第二版", cwd=dev)
+    git("push", "origin", "main", cwd=dev)
+    check(updater.check()["behind"] == 1, "发现新版本")
+    (install / "a.txt").write_text("本机改动", encoding="utf-8")
+    try:
+        updater.pull()
+        check(False, "本机有改动时不更新")
+    except UpdateError:
+        check(True, "本机有改动时不更新")
+    git("checkout", "--", "a.txt", cwd=install)
+    log = updater.pull()
+    check("第二版" in log and (install / "a.txt").read_text(encoding="utf-8") == "2" and updater.status["behind"] == 0,
+          "更新到新版本")
+    check(updater.pull() == "", "没有新版本时什么也不做")
+    try:
+        Updater(WorkDir / "home").check()
+        check(False, "不是 git 安装时给出说明")
+    except UpdateError as error:
+        check("github.com" in str(error), "不是 git 安装时给出说明")
 
 
 def test_plugins(service) -> None:

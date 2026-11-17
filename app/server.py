@@ -13,6 +13,7 @@ import socket
 import subprocess
 import sys
 import threading
+import time
 import traceback
 import webbrowser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -21,8 +22,10 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from config import RootDir, data_dir  # noqa: E402
+from keystore import KeyStoreError  # noqa: E402
 from library import GitError  # noqa: E402
 from service import SkillService, UserError  # noqa: E402
+from updater import Updater, UpdateError  # noqa: E402
 
 # 静态页面目录
 WebDir = Path(__file__).resolve().parent / "web"
@@ -39,8 +42,15 @@ ContentTypes = {".html": "text/html; charset=utf-8", ".js": "text/javascript; ch
                 ".css": "text/css; charset=utf-8", ".svg": "image/svg+xml", ".png": "image/png",
                 ".ico": "image/x-icon"}
 
-# 全局业务对象
+# 全局业务对象、自身更新、HTTP 服务、应用窗口进程
 service = None
+updater = Updater(RootDir)
+httpServer = None
+windowProcess = None
+# 更新重启后接班的进程：跟着哪个窗口进程一起退出（再更新一次时还要传下去）
+attachedPid = 0
+# 更新完代码后要不要重启自己
+restartRequested = False
 
 
 def route(path: str, body: dict) -> dict:
@@ -53,8 +63,8 @@ def route(path: str, body: dict) -> dict:
     force = bool(body.get("force"))
     itemId = body.get("id", "")
     routes = {
-        "/api/state": lambda: service.state(),
-        "/api/stamp": lambda: {"stamp": service.stamp()},
+        "/api/state": lambda: {**service.state(), "update": updater.status},
+        "/api/stamp": lambda: {"stamp": service.stamp(), "update": updater.status},
         "/api/reload": lambda: (service.reload(), service.state())[1],
         "/api/skill/enable": lambda: service.enable(itemId, force),
         "/api/skill/disable": lambda: service.disable(itemId, force),
@@ -91,11 +101,106 @@ def route(path: str, body: dict) -> dict:
         "/api/github/login": lambda: service.github_login(),
         "/api/github/create": lambda: service.github_create(body.get("name", "")),
         "/api/onboarding/skip": lambda: service.skip_onboarding(),
+        "/api/keys/list": lambda: service.keys_list(),
+        "/api/keys/save": lambda: service.keys_save(body.get("fields", {})),
+        "/api/keys/reveal": lambda: service.keys_reveal(itemId, body.get("keyId", "")),
+        "/api/keys/mark": lambda: service.keys_mark(itemId, body.get("keyId", ""), bool(body.get("failed")),
+                                                    body.get("reason", "")),
+        "/api/keys/delete": lambda: service.keys_delete(itemId, force),
+        "/api/keys/export": lambda: service.keys_export(body.get("password", "")),
+        "/api/keys/import-backup": lambda: service.keys_import_backup(body.get("text", ""), body.get("password", "")),
+        "/api/keys/import-csv": lambda: service.keys_import_csv(body.get("text", "")),
+        "/api/app/check": lambda: app_check(),
+        "/api/app/update": lambda: app_update(),
     }
     handler = routes.get(path)
     if handler is None:
         raise UserError(f"未知接口 {path}")
     return handler()
+
+
+def app_check() -> dict:
+    """手动检查 Skillset 自身有没有新版本。
+
+    :returns: 结果
+    """
+    status = updater.check()
+    message = f"有新版本：落后 {status['behind']} 个更新" if status["behind"] else "已经是最新版本"
+    return {"message": message, "update": status}
+
+
+def app_update() -> dict:
+    """拉取新版本；有改动就重启服务，界面等服务回来后自动刷新。
+
+    :returns: 结果，restarting 为真表示马上重启
+    """
+    global restartRequested
+    log = updater.pull()
+    if not log:
+        return {"message": "已经是最新版本", "update": updater.status}
+    restartRequested = True
+    # 先把这次的回复发出去，再停服务
+    threading.Timer(0.5, httpServer.shutdown).start()
+    return {"message": f"已更新：\n{log}\n正在重启…", "restarting": True}
+
+
+def restart_self(port: int) -> None:
+    """用新代码重新启动服务：同一端口、不再开新窗口，原来的窗口关掉时照样停止。
+
+    :param port: 现在用的端口
+    """
+    command = [sys.executable, str(Path(__file__).resolve()), "--port", str(port), "--no-browser"]
+    pid = windowProcess.pid if windowProcess and windowProcess.poll() is None else attachedPid
+    if pid:
+        command += ["--attach-pid", str(pid)]
+    subprocess.Popen(command, cwd=str(RootDir))
+
+
+def wait_pid_then_stop(pid: int, server: ThreadingHTTPServer) -> None:
+    """等指定进程（应用窗口）退出后停止服务。
+
+    :param pid: 进程 id
+    :param server: 要停的服务
+    """
+    if sys.platform == "win32":
+        import ctypes
+        from ctypes import wintypes
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        # 句柄是指针宽度，不声明的话 64 位下会被截成 int
+        kernel32.OpenProcess.restype = wintypes.HANDLE
+        kernel32.OpenProcess.argtypes = (wintypes.DWORD, wintypes.BOOL, wintypes.DWORD)
+        kernel32.WaitForSingleObject.argtypes = (wintypes.HANDLE, wintypes.DWORD)
+        kernel32.CloseHandle.argtypes = (wintypes.HANDLE,)
+        # 0x00100000 = SYNCHRONIZE，只要求能等它结束；打不开说明进程已经不在了
+        handle = kernel32.OpenProcess(0x00100000, False, pid)
+        if handle:
+            kernel32.WaitForSingleObject(handle, 0xFFFFFFFF)
+            kernel32.CloseHandle(handle)
+    else:
+        while True:
+            try:
+                os.kill(pid, 0)
+            except OSError:
+                break
+            time.sleep(5)
+    server.shutdown()
+
+
+def bind_server(port: int, exact: bool) -> ThreadingHTTPServer:
+    """监听端口。exact 为真（重启接班）时必须用同一个端口，旧进程刚退出可能要等一下。
+
+    :param port: 端口
+    :param exact: 是否必须用这个端口
+    :returns: 服务
+    """
+    if not exact:
+        return ThreadingHTTPServer(("127.0.0.1", free_port(port)), Handler)
+    for _attempt in range(50):
+        try:
+            return ThreadingHTTPServer(("127.0.0.1", port), Handler)
+        except OSError:
+            time.sleep(0.2)
+    return ThreadingHTTPServer(("127.0.0.1", port), Handler)
 
 
 def open_folder(path: str) -> dict:
@@ -177,7 +282,7 @@ class Handler(BaseHTTPRequestHandler):
             return self._json(403, {"error": "forbidden"})
         try:
             self._json(200, route(self.path.split("?", 1)[0], body))
-        except (UserError, GitError) as error:
+        except (UserError, GitError, KeyStoreError, UpdateError) as error:
             self._json(400, {"error": str(error)})
         except Exception as error:
             traceback.print_exc()
@@ -228,7 +333,8 @@ def run_window(url: str, server: ThreadingHTTPServer) -> None:
         webbrowser.open(url)
         return
     profile = data_dir() / "window-profile"
-    window = subprocess.Popen([exe, f"--app={url}", f"--user-data-dir={profile}", "--window-size=1320,880",
+    global windowProcess
+    window = windowProcess = subprocess.Popen([exe, f"--app={url}", f"--user-data-dir={profile}", "--window-size=1320,880",
                                "--no-first-run", "--no-default-browser-check", *LeanWindowFlags])
     window.wait()
     server.shutdown()
@@ -253,11 +359,12 @@ def install_shortcut() -> None:
 
 def main() -> None:
     """解析参数，启动服务。"""
-    global service
+    global service, httpServer, attachedPid
     parser = argparse.ArgumentParser(description="Skillset")
     parser.add_argument("--port", type=int, default=8765)
     parser.add_argument("--no-browser", action="store_true", help="只启动服务，不打开窗口")
     parser.add_argument("--install-shortcut", action="store_true", help="在桌面创建快捷方式后退出")
+    parser.add_argument("--attach-pid", type=int, default=0, help="内部用：更新重启后跟着这个窗口进程一起退出")
     args = parser.parse_args()
     if args.install_shortcut:
         return install_shortcut()
@@ -268,13 +375,20 @@ def main() -> None:
         sys.stderr = sys.stdout = open(data_dir() / "app.log", "a", encoding="utf-8", buffering=1)
 
     service = SkillService()
-    port = free_port(args.port)
-    server = ThreadingHTTPServer(("127.0.0.1", port), Handler)
+    server = httpServer = bind_server(args.port, exact=bool(args.attach_pid))
+    port = server.server_address[1]
     url = f"http://127.0.0.1:{port}/"
     print(f"Skillset: {url}", flush=True)
-    if not args.no_browser:
+    if args.attach_pid:
+        attachedPid = args.attach_pid
+        threading.Thread(target=wait_pid_then_stop, args=(args.attach_pid, server), daemon=True).start()
+    elif not args.no_browser:
         threading.Thread(target=run_window, args=(url, server), daemon=True).start()
+    updater.start()
     server.serve_forever()
+    server.server_close()
+    if restartRequested:
+        restart_self(port)
 
 
 if __name__ == "__main__":

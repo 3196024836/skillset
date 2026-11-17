@@ -23,6 +23,8 @@ import mcp
 import plugins
 import skillfs
 from library import GitError, Library
+from key_service import KeyMixin
+from keystore import KeyStore
 from mcp_service import McpMixin
 from watcher import Watcher
 from plugins import PluginError
@@ -44,7 +46,7 @@ def _key(path: Path) -> str:
     return str(path.resolve() if path.exists() else path.absolute()).lower()
 
 
-class SkillService(McpMixin):
+class SkillService(McpMixin, KeyMixin):
     """所有界面操作的入口，内部加锁，同一时间只执行一个操作。
 
     例：
@@ -68,6 +70,8 @@ class SkillService(McpMixin):
         self._hashCache = {}
         # 已装插件列表缓存 (Claude 插件记录的状态, 列表)
         self._pluginCache = None
+        # 密钥保管箱 data/keys.dat
+        self.keys = KeyStore()
         self.reload()
 
     def reload(self) -> None:
@@ -150,7 +154,7 @@ class SkillService(McpMixin):
 
         :returns: [Path]
         """
-        return ([self.library.manifestPath, plugins.installed_record(), plugins.settings_path()]
+        return ([self.library.manifestPath, plugins.installed_record(), plugins.settings_path(), self.keys.path]
                 + [entry["path"] for entry in self._rules_targets()]
                 + [target.path for target in self._mcp_targets()])
 
@@ -225,7 +229,7 @@ class SkillService(McpMixin):
     def state(self) -> dict:
         """生成界面需要的完整状态。
 
-        :returns: {"stamp", "skills", "groups", "plugins", "mcps", "rules", "agents", "dirs", "git", "config"}
+        :returns: {"stamp", "keys", "skills", "groups", "plugins", "mcps", "rules", "agents", "dirs", "git", "config"}
         """
         # 重新扫描时指纹也重算（顺带更新监视的文件夹，比如刚勾选了新的 AI）；
         # 先取指纹再扫描：扫描途中发生的改动，下次比对时还能发现
@@ -279,7 +283,7 @@ class SkillService(McpMixin):
                 gitInfo = {"error": str(error)}
 
             return {
-                "stamp": stamp, "skills": skills, "groups": manifest["groups"], "plugins": self._plugin_state(manifest),
+                "stamp": stamp, "keys": self.keys.summary(), "skills": skills, "groups": manifest["groups"], "plugins": self._plugin_state(manifest),
                 "mcps": self._mcp_state(manifest), "rules": self._rules_state(),
                 "agents": self.agent_rows(),
                 "dirs": [{"path": str(entry["path"]), "label": entry["label"], "install": entry["install"],

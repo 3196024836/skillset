@@ -67,7 +67,7 @@ const McpColor = "#30B0C7";
 
 // 界面状态
 const ui = {
-  view: "all",                 // all | attention | plugins | mcps | group:<id> | ungrouped | agents | rules | settings
+  view: "all",                 // all | attention | plugins | mcps | group:<id> | ungrouped | agents | rules | keys | settings
   filter: "all",
   search: "",
   collapsed: new Set(JSON.parse(localStorage.getItem("collapsed") || "[]")),
@@ -79,6 +79,8 @@ const ui = {
   task: "",                    // 正在执行的长操作
   rulesDraft: null,            // 全局规则编辑中但还没保存的文本
   notice: new Set(),           // 外面新出现、还没提醒过的待上传条目 key
+  keys: null,                  // 「密钥」页的列表（不含明文），见 keys.js
+  updateNotified: false,       // 本次打开是否已经提醒过有新版本
 };
 // 后端状态
 let state = null;
@@ -172,6 +174,7 @@ async function refresh(notify = false) {
   }
   render();
   showNotice();
+  if (ui.view === "keys") await loadKeys();
 }
 
 // ============================================================ 发现外部改动
@@ -188,7 +191,8 @@ async function watchChanges() {
   ui.watchedAt = Date.now();
   ui.watching = true;
   try {
-    const { stamp } = await api("/api/stamp");
+    const { stamp, update } = await api("/api/stamp");
+    noticeUpdate(update);
     if (stamp !== state.stamp && !ui.task) await refresh(true);
   } catch {
     // 服务暂时没响应时下次再试
@@ -250,6 +254,7 @@ function go(view) {
     ui.focus = "";
     render();
     document.getElementById("content").scrollTop = 0;
+    if (view === "keys") loadKeys();
   };
   if (document.startViewTransition && !ReducedMotion) document.startViewTransition(apply);
   else apply();
@@ -288,7 +293,10 @@ function renderNav() {
     ${navItem("agents", `<span class="ico" style="color:var(--purple)">${I.sparkle}</span>`, "AI 应用",
       state.agents.filter((agent) => agent.active).length)}
     ${navItem("rules", `<span class="ico" style="color:var(--orange)">${I.doc}</span>`, "全局规则", rulesPending() || "")}
-    ${navItem("settings", `<span class="ico" style="color:var(--gray)">${I.gear}</span>`, "云端与设置", "")}`;
+    <div class="nav-item ${ui.view === "keys" ? "active" : ""}" data-view="keys" role="button" tabindex="0">
+      <span class="ico" style="color:var(--orange)">${I.key}</span><span class="name">密钥</span>
+      <span class="count ${state.keys.failed ? "alert" : ""}" title="${state.keys.failed ? "有失效的 key" : ""}">${state.keys.failed || state.keys.count || ""}</span></div>
+    ${navItem("settings", `<span class="ico" style="color:var(--gray)">${I.gear}</span>`, "云端与设置", state.update?.behind ? "新" : "")}`;
 }
 
 /** 侧栏底部的云端状态卡片。 */
@@ -327,6 +335,8 @@ function renderToolbar() {
   if (ui.view === "attention") {
     heading = "需要处理";
     subtitle = list.length ? "这些条目没上传、有改动或没装全" : "一切正常";
+    const off = [...items.values()].filter((item) => !item.enabled).length;
+    extra = `<button class="btn" data-act="deleteDisabled" ${off ? "" : "disabled"} title="彻底删除所有关闭着的 skill、插件和 MCP">${I.trash}删除已关闭的${off ? ` ${off} 项` : ""}</button>`;
   } else if (ui.view === "plugins") {
     heading = "插件";
     subtitle = `Claude Code 插件 · ${list.length} 个`;
@@ -354,9 +364,15 @@ function renderToolbar() {
   } else if (ui.view === "settings") {
     heading = "云端与设置";
     subtitle = "";
+  } else if (ui.view === "keys") {
+    heading = "密钥";
+    subtitle = `${state.keys.count} 条` + (state.keys.failed ? ` · ${state.keys.failed} 条有失效的 key` : "") + " · 只存在本机，加密保存";
+    extra = `<button class="btn" data-act="key-import-csv">从 KeePassXC 导入</button>
+      <button class="btn ghost icon" data-act="key-menu" title="备份">${I.more}</button>
+      <button class="btn primary" data-act="key-new">${I.plus}新建密钥</button>`;
   }
 
-  const listView = !["agents", "settings", "rules"].includes(ui.view);
+  const listView = !["agents", "settings", "rules", "keys"].includes(ui.view);
   bar.innerHTML = `
     <div class="grow" style="min-width:0"><h1>${esc(heading)}</h1><div class="subtitle">${esc(subtitle)}</div></div>
     ${extra}
@@ -421,6 +437,7 @@ function renderContent() {
   const content = document.getElementById("content");
   if (ui.view === "agents") return swap(content, renderAgents());
   if (ui.view === "settings") return swap(content, renderSettings());
+  if (ui.view === "keys") return swap(content, renderKeys());
   if (ui.view === "rules") {
     // 正在输入时不重建，避免丢光标
     if (document.activeElement?.id === "rulesText") return;
@@ -600,8 +617,25 @@ function renderSettings() {
     <div class="card"><div class="cloud-hero">
       <img src="icon.svg" alt="" style="width:52px;height:52px">
       <div class="grow"><h3>Skillset ${Version}</h3><p>开源的 AI skill 与插件管理器 · MIT 许可</p></div>
-      <a class="btn" href="${RepoUrl}" target="_blank" rel="noopener">${I.link}GitHub</a></div></div>
+      <a class="btn" href="${RepoUrl}" target="_blank" rel="noopener">${I.link}GitHub</a></div>
+      ${updateRowHtml()}</div>
+    <div class="section-foot">每 6 小时自动查一次有没有新版本。</div>
   </div>`;
+}
+
+/** 关于里的“软件更新”一行。 */
+function updateRowHtml() {
+  const update = state.update || {};
+  if (!update.git) {
+    return `<div class="list-row"><div class="lbl"><b>软件更新</b><span>不是用 git 安装的，没法自动更新，请到 GitHub 下载新版本</span></div></div>`;
+  }
+  const text = update.error ? `检查失败：${update.error}`
+    : update.behind ? `有新版本（${update.behind} 个更新）：${update.latest}`
+    : update.checkedAt ? `已是最新 · ${update.current}` : "还没检查过";
+  return `<div class="list-row"><div class="lbl"><b>软件更新${update.behind ? ' <span class="chip info">有新版本</span>' : ""}</b>
+      <span title="${esc(text)}">${esc(text)}${update.checkedAt ? ` · 检查于 ${esc(update.checkedAt)}` : ""}</span></div>
+    <button class="btn sm" data-act="appCheck">检查更新</button>
+    ${update.behind ? '<button class="btn sm primary" data-act="appUpdate">更新并重启</button>' : ""}</div>`;
 }
 
 // ============================================================ 渲染：全局规则页
@@ -843,14 +877,14 @@ function confirmAlert({ head, message, action = "确定", danger = true, canUplo
 
 /**
  * 输入框弹窗。
- * @param {object} options head / text / fields:[{name,label,value,placeholder}] / action
+ * @param {object} options head / text / fields:[{name,label,value,placeholder,type}] / action
  * @returns {Promise<object|null>} 字段值
  */
 function promptSheet({ head, text = "", fields, action = "好" }) {
   let values = null;
   return sheet(`<form method="dialog"><div class="sheet-body"><h3>${esc(head)}</h3>${text ? `<p>${esc(text)}</p>` : ""}
       ${fields.map((field, i) => `<div class="form-row"><label>${esc(field.label)}</label>
-        <input class="field" name="${esc(field.name)}" value="${esc(field.value || "")}" placeholder="${esc(field.placeholder || "")}" ${i === 0 ? "autofocus" : ""} spellcheck="false"></div>`).join("")}</div>
+        <input class="field" name="${esc(field.name)}" type="${esc(field.type || "text")}" value="${esc(field.value || "")}" placeholder="${esc(field.placeholder || "")}" ${i === 0 ? "autofocus" : ""} spellcheck="false" autocomplete="off"></div>`).join("")}</div>
       <div class="sheet-foot"><button type="button" class="btn" data-close="cancel">取消</button>
         <button type="submit" class="btn primary">${esc(action)}</button></div></form>`, "", (dialog, close) => {
     const form = dialog.querySelector("form");
@@ -1085,7 +1119,90 @@ const Actions = {
   market: () => openMarket(),
   connect: () => onboarding(1, true),
   palette: () => openPalette(),
+  deleteDisabled: () => deleteDisabled(),
+  appCheck: () => task("检查更新", () => api("/api/app/check")),
+  appUpdate: () => updateApp(),
 };
+
+/** 「需要处理」页：彻底删除所有关闭着的条目，先列出来确认一次。 */
+async function deleteDisabled() {
+  const list = [...items.values()].filter((item) => !item.enabled);
+  if (!list.length) return toast("没有关闭着的条目");
+  const kindName = { skill: "skill", plugin: "插件", mcp: "MCP" };
+  const choice = await confirmAlert({
+    head: `彻底删除 ${list.length} 个关闭着的条目？`,
+    list: list.map((item) => `${kindName[item.kind]}  ${title(item)}`).join("\n"),
+    message: "会从云端库和本机所有 AI 里删掉，无法恢复。",
+    action: "全部删除",
+  });
+  if (choice !== "ok") return;
+  await task(`删除 ${list.length} 项`, async () => {
+    const failed = [];
+    for (const item of list) {
+      try {
+        await api(`${base(item)}/delete`, { id: item.id, force: true });
+      } catch (error) {
+        failed.push(`${title(item)}：${error.message}`);
+      }
+      ui.selected.delete(item.key);
+      if (ui.inspect === item.key) ui.inspect = "";
+    }
+    return { message: `已删除 ${list.length - failed.length} 项`, warning: failed.length ? `${failed.length} 项没删掉：\n${failed.join("\n")}` : "" };
+  });
+}
+
+/** 后台检查发现新版本时提醒一次。 */
+function noticeUpdate(update) {
+  if (!update) return;
+  const had = state.update?.behind;
+  state.update = update;
+  if (Boolean(update.behind) !== Boolean(had)) {
+    renderNav();
+    if (ui.view === "settings") renderContent();
+  }
+  if (!update.behind || ui.updateNotified || document.hidden) return;
+  ui.updateNotified = true;
+  toast(`Skillset 有新版本（${update.behind} 个更新）`, { type: "warn", action: "更新", duration: 15000, onAction: updateApp });
+}
+
+/** 等一会儿。 */
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+/** 拉取新版本并重启服务，等服务回来后刷新页面。 */
+async function updateApp() {
+  const choice = await confirmAlert({ head: "更新 Skillset？", message: "从 GitHub 拉取新版本，然后自动重启，几秒钟就好。", action: "更新并重启", danger: false });
+  if (choice !== "ok") return;
+  if (ui.task) return toast(`正在${ui.task}，请稍等`, { type: "warn" });
+  ui.task = "更新 Skillset";
+  const hud = document.getElementById("hud");
+  const show = (text) => (hud.innerHTML = `<div class="progress-hud" role="status"><span class="spin"></span>${esc(text)}</div>`);
+  show("正在更新 Skillset…");
+  try {
+    const result = await api("/api/app/update");
+    if (result.restarting) {
+      show("已更新，正在重启…");
+      await sleep(1500);
+      for (let attempt = 0; attempt < 60; attempt++) {
+        try {
+          await api("/api/stamp");
+          location.reload();
+          return;
+        } catch {
+          await sleep(1000);
+        }
+      }
+      toast("重启后没连上，请关掉窗口重新打开 Skillset", { type: "err" });
+      return;
+    }
+    showResult(result);
+  } catch (error) {
+    toast(error.message, { type: "err" });
+  } finally {
+    ui.task = "";
+    hud.innerHTML = "";
+  }
+  await refresh();
+}
 
 /** 分组：改名和备注。 */
 async function editGroup(groupId) {
@@ -1588,7 +1705,11 @@ document.addEventListener("click", (event) => {
       run: () => moveToGroup([...ui.selected], group.id).then(() => { ui.selected.clear(); render(); }) })),
       { label: "未分组", run: () => moveToGroup([...ui.selected], "") }]);
     case "batch-clear": ui.selected.clear(); render(); return;
+    case "key-menu": return menuAt(actor, [
+      { label: "导出备份…", icon: I.cloudUp, run: KeyActions["key-export"] },
+      { label: "导入备份…", icon: I.cloudDown, run: KeyActions["key-import-backup"] }]);
     default:
+      if (act && KeyActions[act]) return KeyActions[act](actor);
       if (act && Actions[act]) return Actions[act]();
   }
 

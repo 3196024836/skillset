@@ -24,6 +24,9 @@
 - **全局规则**：一份规则正本，同步成各 AI 的全局规则文件（`CLAUDE.md`、`AGENTS.md`、`GEMINI.md`）；可从任一 AI 导入，覆盖不同内容前先问并备份。
 - **云端 = 你自己的 GitHub 私有仓库**：上传、更新、删除；换新电脑连上同一个仓库，一键全部装回。
 - **上传前查密钥**：发现 API key、token、私钥就拦下，不会推到云端。
+- **密钥管理**：每条密钥有名字、介绍、环境变量名，可以加多个备用 key；前面的不好使了标成失效，自动轮到下一个，失效的在侧栏标出来。只存在本机（Windows 加密），可导出带密码的备份，可从 KeePassXC 导出的 CSV 导入。
+- **需要处理页一键清理**：一键彻底删除所有关闭着的 skill、插件和 MCP，删之前列出来确认一次。
+- **软件自动更新**：每 6 小时查一次新版本（git 安装时），在「云端与设置」里也能手动检查、一键更新并重启。
 
 <p align="center">
   <img src="docs/screenshot-dark.png" width="430" alt="深色模式">
@@ -82,6 +85,8 @@ cd skillset
 - **MCP**：定义存在 `manifest.json` 的 `mcps` 里（密钥值清空）；Claude Code 通过官方 `claude mcp` 命令写入，其他 AI 直接改各自的配置文件（JSON / TOML），改之前备份到 `data/backups/`。
 - **全局规则**：正本是 `library/rules/global.md`；同步时只给没有规则文件的 AI 写上，已有不同内容的要在「全局规则」页手动应用。
 - **AI 列表**：在 `app/agents.json` 里，加新 AI 只要加一行。
+- **密钥**：存在 `data/keys.dat`，用 Windows DPAPI 加密，只有这台电脑、这个账户能解开（防的是文件被拷走；本账户下运行的程序都能解开）。换电脑用「导出备份」的文件和密码导回。
+  命令行 `python app/keycli.py run 名字[=变量名] -- 命令` 只把在用的 key 交给这一个命令，输出里出现的 key 换成 `***`；只给一条密钥时，命令失败且输出像认证失败（401、invalid api key、余额不足等）会把它标成失效，换下一个 key 重跑。`keycli.py list` 列出密钥，`keycli.py fail 名字` 手动标失效，都不打印明文。
 - **安全**：服务只监听 `127.0.0.1`，并校验请求头和 Host，其他网页调用不了。
 
 ## 项目结构
@@ -93,6 +98,8 @@ app/
   mcp_service.py  MCP 工具和全局规则的业务逻辑   mcp.py  各 AI 的 MCP 配置读写
   library.py    库（git）操作        skillfs.py   扫描、哈希、复制、密钥检查
   plugins.py    claude plugin 命令   github.py    GitHub CLI 登录和建仓库
+  keystore.py   密钥加密存取、备份   keycli.py    密钥命令行   key_service.py  密钥页接口
+  updater.py    软件自身的检查更新
   agents.json   支持的 AI 及目录
   web/          界面（原生 HTML/CSS/JS，无构建步骤）
 assets/         应用图标             scripts/     图标生成脚本
