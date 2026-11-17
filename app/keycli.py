@@ -6,6 +6,8 @@
     python app/keycli.py run OpenAI -- python script.py          # 用条目里设的环境变量名
     python app/keycli.py run OpenAI=MY_KEY Other -- some-cmd     # 指定环境变量名，可以一次给多个
     python app/keycli.py fail OpenAI --reason "401"              # 把当前在用的 key 标成失效
+    python app/keycli.py add OpenAI --env OPENAI_API_KEY --clipboard   # 从剪贴板添加；已有这条就加成备用
+    某命令 | python app/keycli.py add OpenAI                      # 从管道添加
 
 run 只把 key 交给这一个子进程，不写进系统环境变量；子进程输出里出现的 key 会被替换成 ***。
 只给一条密钥时，如果命令失败且输出像是认证失败（401、invalid api key、余额不足等），
@@ -131,6 +133,41 @@ def cmd_run(store: KeyStore, specs: list, command: list, retry: bool) -> int:
         _say("换下一个 key 重跑")
 
 
+def read_value(fromClipboard: bool) -> str:
+    """取要添加的 key：剪贴板、管道，或者在终端里隐藏输入。不从命令行参数取，免得留在命令记录里。"""
+    if fromClipboard:
+        if sys.platform != "win32":
+            raise KeyStoreError("--clipboard 只支持 Windows，请改用管道：... | keycli.py add 名字")
+        done = subprocess.run(["powershell", "-NoProfile", "-Command", "Get-Clipboard -Raw"],
+                              capture_output=True, text=True, encoding="utf-8", errors="replace")
+        return done.stdout.strip()
+    if not sys.stdin.isatty():
+        return sys.stdin.read().strip()
+    import getpass
+    return getpass.getpass("粘贴 key（不会显示）：").strip()
+
+
+def cmd_add(store: KeyStore, name: str, env: str, note: str, label: str, fromClipboard: bool) -> int:
+    """添加 key：没有这条密钥就新建，有就加在最后当备用。"""
+    value = read_value(fromClipboard)
+    if not value:
+        _say("没读到 key：剪贴板或输入是空的")
+        return 2
+    try:
+        entry = store._find(store.load(), name)
+    except KeyStoreError:
+        entry = None
+    keys = [{"id": key["id"], "label": key["label"]} for key in entry["keys"]] if entry else []
+    saved = store.save_entry({
+        "id": entry["id"] if entry else "", "name": entry["name"] if entry else name,
+        "note": note or (entry["note"] if entry else ""), "env": env or (entry["env"] if entry else ""),
+        "keys": keys + [{"value": value, "label": label}]})
+    count = len(saved["keys"])
+    _say(f"已把 key（末 4 位 {value[-4:]}）加到 {saved['name']}，" + ("新建了这条密钥" if count == 1 else f"排第 {count} 个，当备用")
+         + ("" if saved["env"] else "。还没设环境变量名，用 --env 补上"))
+    return 0
+
+
 def cmd_fail(store: KeyStore, name: str, reason: str) -> int:
     """把当前在用的 key 标成失效。"""
     entry, key, index = store.active(name)
@@ -159,6 +196,12 @@ def main() -> int:
     runParser = sub.add_parser("run", help="注入 key 运行命令：run 名字[=变量名] ... -- 命令")
     runParser.add_argument("names", nargs="+")
     runParser.add_argument("--no-retry", action="store_true", help="认证失败时不自动换 key 重跑")
+    addParser = sub.add_parser("add", help="添加 key（从剪贴板或管道读，没有这条就新建，有就加成备用）")
+    addParser.add_argument("name")
+    addParser.add_argument("--env", default="", help="环境变量名，比如 OPENAI_API_KEY")
+    addParser.add_argument("--note", default="", help="介绍：用在哪、权限、到期时间")
+    addParser.add_argument("--label", default="", help="这个 key 的备注，比如“公司账号”")
+    addParser.add_argument("--clipboard", action="store_true", help="从剪贴板读 key")
     failParser = sub.add_parser("fail", help="把当前在用的 key 标成失效")
     failParser.add_argument("name")
     failParser.add_argument("--reason", default="")
@@ -169,6 +212,8 @@ def main() -> int:
             return cmd_list(store)
         if args.action == "run":
             return cmd_run(store, args.names, command, not args.no_retry)
+        if args.action == "add":
+            return cmd_add(store, args.name, args.env, args.note, args.label, args.clipboard)
         return cmd_fail(store, args.name, args.reason)
     except KeyStoreError as error:
         _say(str(error))

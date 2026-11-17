@@ -25,39 +25,48 @@ function renderKeys() {
   const data = ui.keys;
   if (!data) return `<div class="page"><div class="empty-row">正在读取…</div></div>`;
   if (data.error) return emptyHtml(I.key, "读不到密钥", data.error);
-  const usage = `<div class="section-foot">给 AI 或脚本用：<code>python app/keycli.py run 名字 -- 命令</code>
-    只把在用的 key 交给这个命令，不写进系统；认证失败会自动标成失效、换下一个 key 重跑。<code>keycli.py list</code> 看有哪些。</div>
-    <div class="section-foot">密钥用 Windows 加密存在本机 data/keys.dat，只有这台电脑、你这个账户能解开；
-    换电脑解不开，记得「导出备份」存到网盘或 U 盘。</div>`;
+  const help = `<details class="key-help"><summary>怎么给 AI 和脚本用</summary>
+    <p><code>python app/keycli.py run 名字 -- 命令</code> 只把在用的 key 交给这个命令，不写进系统；认证失败会自动标成失效、换下一个 key 重跑。</p>
+    <p><code>keycli.py add 名字 --env 变量名 --clipboard</code> 把剪贴板里的 key 加进来（已有这条就加成备用）；<code>keycli.py list</code> 看有哪些。</p>
+    <p>密钥用 Windows 加密存在本机 data/keys.dat，只有这台电脑、你这个账户能解开。换电脑解不开，记得「导出备份」存到网盘或 U 盘。</p></details>`;
   if (!data.entries.length) {
-    return `<div class="page">${emptyHtml(I.key, "还没有密钥", "点右上角「新建密钥」，或从 KeePassXC 导出 CSV 后导入。")}${usage}</div>`;
+    return `<div class="page">${emptyHtml(I.key, "还没有密钥", "点右上角「新建密钥」，或用「导入」把 KeePassXC 导出的 CSV 导进来。")}${help}</div>`;
   }
-  const cards = data.entries.map((entry) => {
-    const rows = entry.keys.map((key, index) => {
-      const active = key.id === entry.activeId;
-      const chip = key.status === "failed" ? '<span class="chip warn">失效</span>'
-        : active ? '<span class="chip ok">在用</span>' : '<span class="chip plain">备用</span>';
-      const detail = key.status === "failed" ? `${key.failedAt} · ${key.reason}` : key.lastUsedAt ? `上次使用 ${key.lastUsedAt}` : `添加于 ${key.addedAt}`;
-      const ids = `data-id="${esc(entry.id)}" data-kid="${esc(key.id)}"`;
-      return `<div class="list-row key-row ${key.status === "failed" ? "failed" : ""}">
+  return `<div class="page key-page">${data.entries.map(keyCardHtml).join("")}${help}</div>`;
+}
+
+/** 一条密钥的卡片：头部是名字、变量名和状态，下面按使用顺序列出 key。 */
+function keyCardHtml(entry) {
+  const failed = entry.keys.filter((key) => key.status === "failed").length;
+  const status = !entry.activeId ? '<span class="chip danger">没有可用的 key</span>'
+    : failed ? `<span class="chip warn">${failed} 个失效</span>` : "";
+  const rows = entry.keys.map((key, index) => {
+    const isFailed = key.status === "failed";
+    const chip = isFailed ? '<span class="chip warn">失效</span>'
+      : key.id === entry.activeId ? '<span class="chip ok">在用</span>' : '<span class="chip plain">备用</span>';
+    const detail = isFailed ? `${key.failedAt} 标为失效${key.reason ? `：${key.reason}` : ""}`
+      : key.lastUsedAt ? `上次使用 ${key.lastUsedAt}` : `添加于 ${key.addedAt}`;
+    const ids = `data-id="${esc(entry.id)}" data-kid="${esc(key.id)}"`;
+    return `<div class="key-row ${isFailed ? "failed" : ""}">
         <span class="key-no">${index + 1}</span>
-        <div class="lbl"><b><span class="mono key-value" data-kid="${esc(key.id)}">${esc(key.masked)}</span>${key.label ? ` <span class="faint">${esc(key.label)}</span>` : ""}</b>
-          <span title="${esc(detail)}">${esc(detail)}</span></div>
+        <div class="key-main"><div class="key-line"><span class="key-value" data-kid="${esc(key.id)}">${esc(key.masked)}</span>
+          ${key.label ? `<span class="key-label">${esc(key.label)}</span>` : ""}</div>
+          <div class="key-detail" title="${esc(detail)}">${esc(detail)}</div></div>
         ${chip}
-        <button class="btn sm" data-act="key-reveal" ${ids}>显示</button>
-        <button class="btn sm" data-act="key-copy" ${ids}>复制</button>
-        ${key.status === "failed" ? `<button class="btn sm" data-act="key-restore" ${ids}>恢复</button>`
-          : `<button class="btn sm" data-act="key-fail" ${ids} title="这个 key 不好使了，以后用下一个">标为失效</button>`}</div>`;
-    }).join("");
-    const failed = entry.keys.filter((key) => key.status === "failed").length;
-    return `<div class="section-title key-head"><span class="grow">${esc(entry.name)}
-        ${entry.env ? `<code>${esc(entry.env)}</code>` : ""}${!entry.activeId ? ' <span class="chip danger">没有可用的 key</span>'
-        : failed ? ` <span class="chip warn">${failed} 个失效</span>` : ""}</span>
-        <button class="btn ghost icon sm" data-act="key-edit" data-id="${esc(entry.id)}" title="编辑">${I.pencil}</button>
-        <button class="btn ghost icon sm" data-act="key-delete" data-id="${esc(entry.id)}" title="删除">${I.trash}</button></div>
-      <div class="card">${entry.note ? `<div class="list-row key-note">${esc(entry.note)}</div>` : ""}${rows}</div>`;
+        <div class="key-tools">
+          <button class="btn ghost icon sm" data-act="key-reveal" ${ids} title="显示">${I.eye}</button>
+          <button class="btn ghost icon sm" data-act="key-copy" ${ids} title="复制">${I.copy}</button>
+          ${isFailed ? `<button class="btn sm" data-act="key-restore" ${ids}>恢复</button>`
+            : `<button class="btn sm" data-act="key-fail" ${ids} title="这个 key 不好使了，以后用下一个">标为失效</button>`}</div></div>`;
   }).join("");
-  return `<div class="page">${cards}${usage}</div>`;
+  return `<section class="card key-card">
+      <header class="key-card-head">
+        <span class="key-avatar">${esc([...entry.name][0]?.toUpperCase() || "?")}</span>
+        <div class="key-title"><div><b>${esc(entry.name)}</b>${entry.env ? `<code>${esc(entry.env)}</code>` : ""}${status}</div>
+          ${entry.note ? `<p>${esc(entry.note)}</p>` : ""}</div>
+        <button class="btn ghost icon sm" data-act="key-edit" data-id="${esc(entry.id)}" title="编辑">${I.pencil}</button>
+        <button class="btn ghost icon sm" data-act="key-delete" data-id="${esc(entry.id)}" title="删除">${I.trash}</button>
+      </header>${rows}</section>`;
 }
 
 /** 新建或编辑一条密钥的弹窗。已有的 key 不回填明文：留空表示不改。 */
@@ -140,14 +149,16 @@ const KeyActions = {
     if (span.dataset.masked) {
       span.textContent = span.dataset.masked;
       delete span.dataset.masked;
-      actor.textContent = "显示";
+      actor.title = "显示";
+      actor.classList.remove("on");
       return;
     }
     try {
       const value = await keyValue(actor);
       span.dataset.masked = span.textContent;
       span.textContent = value;
-      actor.textContent = "隐藏";
+      actor.title = "隐藏";
+      actor.classList.add("on");
       setTimeout(() => span.dataset.masked && actor.click(), RevealMs);
     } catch (error) {
       toast(error.message, { type: "err" });

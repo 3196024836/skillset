@@ -56,6 +56,8 @@ const I = {
   bag: svg('<path d="M5 8h14l-1 12H6z"/><path d="M9 8V6.5a3 3 0 0 1 6 0V8"/>'),
   link: svg('<path d="M10 14a4 4 0 0 0 5.7 0l3-3a4 4 0 0 0-5.7-5.7l-1 1"/><path d="M14 10a4 4 0 0 0-5.7 0l-3 3a4 4 0 0 0 5.7 5.7l1-1"/>'),
   key: svg('<circle cx="8" cy="15" r="4"/><path d="m11 12 9-9M17 6l2 2M15 8l2 2"/>'),
+  eye: svg('<path d="M2.5 12S6 5.5 12 5.5 21.5 12 21.5 12 18 18.5 12 18.5 2.5 12 2.5 12z"/><circle cx="12" cy="12" r="3"/>'),
+  copy: svg('<rect x="8.5" y="8.5" width="11" height="11" rx="2"/><path d="M15.5 8.5v-3a2 2 0 0 0-2-2h-8a2 2 0 0 0-2 2v8a2 2 0 0 0 2 2h3"/>'),
   plug: svg('<path d="M9 3v4M15 3v4"/><path d="M6.5 7h11v3.5a5.5 5.5 0 0 1-11 0z"/><path d="M12 16v5"/>'),
   doc: svg('<path d="M6.5 3.5h7l4 4v13h-11z"/><path d="M13.5 3.5v4h4M9 12h6M9 15.5h6"/>'),
 };
@@ -367,20 +369,23 @@ function renderToolbar() {
   } else if (ui.view === "keys") {
     heading = "密钥";
     subtitle = `${state.keys.count} 条` + (state.keys.failed ? ` · ${state.keys.failed} 条有失效的 key` : "") + " · 只存在本机，加密保存";
-    extra = `<button class="btn" data-act="key-import-csv">从 KeePassXC 导入</button>
-      <button class="btn ghost icon" data-act="key-menu" title="备份">${I.more}</button>
+    extra = `<button class="btn" data-act="key-menu">${I.cloudDown}导入${I.chev}</button>
+      <button class="btn" data-act="key-export" title="用密码加密导出，换电脑时导回来">${I.cloudUp}导出备份</button>
       <button class="btn primary" data-act="key-new">${I.plus}新建密钥</button>`;
   }
 
   const listView = !["agents", "settings", "rules", "keys"].includes(ui.view);
-  bar.innerHTML = `
-    <div class="grow" style="min-width:0"><h1>${esc(heading)}</h1><div class="subtitle">${esc(subtitle)}</div></div>
-    ${extra}
-    ${listView ? `<div class="search">${I.search}<input id="search" class="field" placeholder="搜索" value="${esc(ui.search)}" spellcheck="false"><span class="kbd">Ctrl K</span></div>` : ""}
+  // 密钥页和 skill 无关，不放扫描、更新、同步这些按钮
+  const skillTools = ui.view === "keys" ? "" : `
     <button class="btn icon ghost" data-act="rescan" title="重新扫描本机（F5）">${I.rescan}</button>
     <button class="btn" data-act="update" title="从云端拉取最新内容并装到本机">${I.cloudDown}更新</button>
     <button class="btn primary" data-act="sync" title="把启用的 skill 装到所有选中的 AI，关闭的删掉">${I.sync}同步到所有 AI</button>
     <button class="btn icon ghost" data-act="app-menu" title="更多">${I.more}</button>`;
+  bar.innerHTML = `
+    <div class="grow" style="min-width:0"><h1>${esc(heading)}</h1><div class="subtitle">${esc(subtitle)}</div></div>
+    ${extra}
+    ${listView ? `<div class="search">${I.search}<input id="search" class="field" placeholder="搜索" value="${esc(ui.search)}" spellcheck="false"><span class="kbd">Ctrl K</span></div>` : ""}
+    ${skillTools}`;
 
   // 搜索和筛选只在列表视图出现
   if (listView && ui.view !== "attention") {
@@ -1706,8 +1711,8 @@ document.addEventListener("click", (event) => {
       { label: "未分组", run: () => moveToGroup([...ui.selected], "") }]);
     case "batch-clear": ui.selected.clear(); render(); return;
     case "key-menu": return menuAt(actor, [
-      { label: "导出备份…", icon: I.cloudUp, run: KeyActions["key-export"] },
-      { label: "导入备份…", icon: I.cloudDown, run: KeyActions["key-import-backup"] }]);
+      { label: "从 KeePassXC 导出的 CSV…", icon: I.doc, run: KeyActions["key-import-csv"] },
+      { label: "从备份文件…", icon: I.cloudDown, run: KeyActions["key-import-backup"] }]);
     default:
       if (act && KeyActions[act]) return KeyActions[act](actor);
       if (act && Actions[act]) return Actions[act]();

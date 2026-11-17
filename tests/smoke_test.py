@@ -399,6 +399,18 @@ def test_keys(service) -> None:
     result = service.keys_import_csv(csvText)
     names = [item["name"] for item in service.keys_list()["entries"]]
     check(names == ["Demo", "OpenAI"] and "跳过 1 条" in result["message"], "导入 KeePassXC CSV")
+    # 命令行添加：管道传值，已有的加成备用，没有的新建；输出里不露明文
+    addKey = lambda *args, value: subprocess.run(  # noqa: E731
+        [sys.executable, str(AppDir / "keycli.py"), "add", *args], input=value, capture_output=True,
+        text=True, encoding="utf-8", errors="replace")
+    added = addKey("openai", "--label", "备用", value="sk-openai-backup-9999\n")
+    added2 = addKey("Fresh", "--env", "FRESH_KEY", "--note", "新的", value="fresh-value-7777")
+    byName = {item["name"]: item for item in service.keys_list()["entries"]}
+    check(added.returncode == 0 and len(byName["OpenAI"]["keys"]) == 2 and byName["OpenAI"]["keys"][1]["label"] == "备用",
+          "命令行添加备用 key")
+    check(added2.returncode == 0 and byName["Fresh"]["env"] == "FRESH_KEY" and "sk-openai-backup" not in added.stderr,
+          "命令行新建密钥且不露明文")
+    check(addKey("Fresh", value="").returncode == 2, "没读到 key 时报错")
     check(service.keys_delete(entry["id"], False).get("needConfirm"), "删除前要确认")
 
 
