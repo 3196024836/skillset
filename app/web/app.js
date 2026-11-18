@@ -153,6 +153,8 @@ function rulesPending() {
  * @param {boolean} notify 是否提醒新出现的待上传条目（只有自动发现外部改动时才提醒）
  */
 async function refresh(notify = false) {
+  // 密钥列表很快，先单独刷新，不等较慢的全量状态；否则刚保存完点「编辑」会拿到旧数据
+  const keysLoaded = ui.view === "keys" ? loadKeys() : null;
   try {
     state = await api("/api/state");
   } catch (error) {
@@ -176,7 +178,7 @@ async function refresh(notify = false) {
   }
   render();
   showNotice();
-  if (ui.view === "keys") await loadKeys();
+  await keysLoaded;
 }
 
 // ============================================================ 发现外部改动

@@ -71,11 +71,15 @@ function keyCardHtml(entry) {
 
 /** 新建或编辑一条密钥的弹窗。已有的 key 不回填明文：留空表示不改。 */
 async function editKey(entryId = "") {
+  // 打开前取最新的，免得拿旧列表保存时把刚加的 key 覆盖掉
+  if (entryId) await loadKeys();
   const entry = ui.keys?.entries.find((item) => item.id === entryId);
+  if (entryId && !entry) return toast("这条密钥已经不存在了", { type: "err" });
   const keyRow = (key = {}) => `<div class="key-edit-row" data-kid="${esc(key.id || "")}">
       <input class="field mono" name="value" type="password" autocomplete="off" spellcheck="false"
         placeholder="${key.id ? `${esc(key.masked)}（不改就留空）` : "粘贴 key"}">
       <input class="field" name="label" value="${esc(key.label || "")}" placeholder="备注，比如“公司账号”" spellcheck="false">
+      <button type="button" class="btn ghost icon sm" data-peek title="显示 / 隐藏">${I.eye}</button>
       <button type="button" class="btn ghost icon sm" data-move="-1" title="往前挪">↑</button>
       <button type="button" class="btn ghost icon sm" data-move="1" title="往后挪">↓</button>
       <button type="button" class="btn ghost icon sm" data-remove title="删掉这个 key">${I.x}</button></div>`;
@@ -94,9 +98,24 @@ async function editKey(entryId = "") {
       list.insertAdjacentHTML("beforeend", keyRow());
       list.lastElementChild.querySelector("input").focus();
     });
-    list.addEventListener("click", (event) => {
+    list.addEventListener("click", async (event) => {
       const row = event.target.closest(".key-edit-row");
       if (!row) return;
+      const peek = event.target.closest("[data-peek]");
+      if (peek) {
+        // 已有的 key 没回填明文，第一次看时向后端要；填回去的值和原来一样，保存时算没改
+        const input = row.querySelector('[name="value"]');
+        if (input.type === "password" && !input.value && row.dataset.kid) {
+          try {
+            input.value = await keyValue({ dataset: { id: entryId, kid: row.dataset.kid } });
+          } catch (error) {
+            return toast(error.message, { type: "err" });
+          }
+        }
+        input.type = input.type === "password" ? "text" : "password";
+        peek.classList.toggle("on", input.type === "text");
+        return;
+      }
       if (event.target.closest("[data-remove]")) row.remove();
       const move = event.target.closest("[data-move]")?.dataset.move;
       if (move === "-1" && row.previousElementSibling) row.previousElementSibling.before(row);

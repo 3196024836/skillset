@@ -349,11 +349,32 @@ def test_keys(service) -> None:
           "调整顺序不丢值")
     service.keys_save({"id": entry["id"], "name": "Demo", "env": "DEMO_KEY",
                        "keys": [{"id": entry["keys"][0]["id"]}, {"id": entry["keys"][1]["id"]}]})
+    # 新建时名字已存在：新 key 加到后面当备用；同一个 key 再加要提示
+    merged = service.keys_save({"name": "demo", "env": "OTHER", "keys": [{"value": "sk-test-third-5555"}]})
+    third = service.keys_list()["entries"][0]
+    check("备用" in merged["message"] and len(third["keys"]) == 3 and third["env"] == "DEMO_KEY", "重名新建时加成备用 key")
     try:
-        service.keys_save({"name": "demo", "keys": [{"value": "x"}]})
-        check(False, "重名要拒绝")
+        service.keys_save({"name": "Demo", "keys": [{"value": "sk-test-third-5555"}]})
+        check(False, "重复的 key 要提示")
     except KeyStoreError:
-        check(True, "重名要拒绝")
+        check(True, "重复的 key 要提示")
+    # 弹窗里点「显示」后原样保存：值不变、状态不重置
+    service.keys_save({"id": entry["id"], "name": "Demo", "env": "DEMO_KEY",
+                       "keys": [{"id": key["id"], "value": service.keys_reveal(entry["id"], key["id"])["value"]}
+                                for key in third["keys"][:2]]})
+    check([key["id"] for key in service.keys_list()["entries"][0]["keys"]] == [key["id"] for key in third["keys"][:2]],
+          "看过明文再保存不变")
+    try:
+        service.keys_save({"id": entry["id"], "name": "Other", "keys": [{"value": "x"}]})
+        service.keys_save({"name": "Other2", "keys": [{"value": "y"}]})
+        service.keys_save({"id": entry["id"], "name": "Other2", "keys": [{"value": "x"}]})
+        check(False, "改名撞名要拒绝")
+    except KeyStoreError:
+        check(True, "改名撞名要拒绝")
+    other2 = next(item for item in service.keys_list()["entries"] if item["name"] == "Other2")
+    service.keys_delete(other2["id"], True)
+    service.keys_save({"id": entry["id"], "name": "Demo", "env": "DEMO_KEY",
+                       "keys": [{"value": bad}, {"value": good, "label": "备用"}]})
 
     # 命令行：第一个 key 认证失败，自动标失效、换第二个重跑；输出里的 key 被隐藏
     script = WorkDir / "fake_api.py"

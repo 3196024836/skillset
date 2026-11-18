@@ -259,7 +259,10 @@ class KeyStore:
             raise KeyStoreError("请填写名字")
         if env and not EnvPattern.match(env):
             raise KeyStoreError("环境变量名只能用字母、数字和下划线，且不能以数字开头")
-        if any(item["name"].lower() == name.lower() and item["id"] != entryId for item in entries):
+        sameName = next((item for item in entries if item["name"].lower() == name.lower()), None)
+        if sameName and not entryId:
+            return self._append_keys(entries, sameName, fields)
+        if sameName and sameName["id"] != entryId:
             raise KeyStoreError(f"已经有叫 {name} 的密钥了")
         old = next((item for item in entries if item["id"] == entryId), None) if entryId else None
         if entryId and old is None:
@@ -294,6 +297,27 @@ class KeyStore:
             entries.append(entry)
         self.save(entries)
         return entry
+
+    def _append_keys(self, entries: list, entry: dict, fields: dict) -> dict:
+        """新建时名字已存在：把新 key 加在这条后面当备用；介绍和变量名只补空的，不覆盖。
+
+        :returns: 保存后的条目，带 appended（加了几个）
+        """
+        values = {key["value"] for key in entry["keys"]}
+        added = []
+        for item in fields.get("keys") or []:
+            value = str(item.get("value") or "").strip()
+            if value and value not in values:
+                values.add(value)
+                added.append({"value": value, "label": str(item.get("label") or "").strip()})
+        if not added:
+            raise KeyStoreError(f"这个 key 已经在 {entry['name']} 里了")
+        saved = self.save_entry({
+            "id": entry["id"], "name": entry["name"],
+            "note": entry["note"] or str(fields.get("note", "")).strip(),
+            "env": entry["env"] or str(fields.get("env", "")).strip(),
+            "keys": [{"id": key["id"], "label": key["label"]} for key in entry["keys"]] + added})
+        return dict(saved, appended=len(added))
 
     def mark(self, entryId: str, keyId: str, failed: bool, reason: str = "") -> dict:
         """把 key 标成失效，或恢复成可用。

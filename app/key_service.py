@@ -24,6 +24,9 @@ class KeyMixin:
     def keys_save(self, fields: dict) -> dict:
         """新建或修改一条密钥。"""
         entry = self.keys.save_entry(fields)
+        if entry.get("appended"):
+            return {"message": f"已经有 {entry['name']} 了，新 key 加在它后面当备用（现在共 {len(entry['keys'])} 个）",
+                    "id": entry["id"]}
         return {"message": f"已保存密钥 {entry['name']}", "id": entry["id"]}
 
     def keys_reveal(self, entryId: str, keyId: str) -> dict:
