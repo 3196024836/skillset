@@ -1,5 +1,5 @@
 /**
- * Skillset 前端：拉取 /api/state 渲染三栏界面（侧栏 | 列表 | 详情），操作调用 /api/*。
+ * Skillset 前端：拉取 /api/state 渲染界面（空间切换栏 | 侧栏 | 主区 | 详情），技能和密钥是两个互不相干的空间，操作调用 /api/*。
  * 会丢数据的操作由后端返回 needConfirm，这里弹出警告框，用户确认后带 force 重发。
  */
 
@@ -69,7 +69,8 @@ const McpColor = "#30B0C7";
 
 // 界面状态
 const ui = {
-  view: "all",                 // all | attention | plugins | mcps | group:<id> | ungrouped | agents | rules | keys | settings
+  view: "all",                 // 技能：all | attention | plugins | mcps | group:<id> | ungrouped | agents | rules | settings；密钥：keys；软件设置：app
+  skillView: "all",            // 离开技能空间前停在哪个视图，切回来时回到那里
   filter: "all",
   search: "",
   collapsed: new Set(JSON.parse(localStorage.getItem("collapsed") || "[]")),
@@ -82,6 +83,9 @@ const ui = {
   rulesDraft: null,            // 全局规则编辑中但还没保存的文本
   notice: new Set(),           // 外面新出现、还没提醒过的待上传条目 key
   keys: null,                  // 「密钥」页的列表（不含明文），见 keys.js
+  keySel: "",                  // 密钥空间里选中的那条
+  keySearch: "",               // 密钥空间的搜索词
+  keyFilter: "all",            // 密钥空间的筛选：all | failed
   updateNotified: false,       // 本次打开是否已经提醒过有新版本
 };
 // 后端状态
@@ -140,6 +144,11 @@ function avatarHtml(item) {
   return { color: groupColor(item.group), html: esc([...title(item)][0].toUpperCase()) };
 }
 
+/** 当前所在的空间：技能和密钥互不相干，软件设置单独一页。 */
+function space() {
+  return ui.view === "keys" ? "keys" : ui.view === "app" ? "app" : "skills";
+}
+
 /** 规则文件里和正本不一致的数量（侧栏提示用）。 */
 function rulesPending() {
   const rules = state.rules;
@@ -154,7 +163,7 @@ function rulesPending() {
  */
 async function refresh(notify = false) {
   // 密钥列表很快，先单独刷新，不等较慢的全量状态；否则刚保存完点「编辑」会拿到旧数据
-  const keysLoaded = ui.view === "keys" ? loadKeys() : null;
+  const keysLoaded = space() === "keys" ? loadKeys() : null;
   try {
     state = await api("/api/state");
   } catch (error) {
@@ -239,19 +248,27 @@ function renderSkeleton() {
 /** 渲染整个界面。动画只在切换视图时播放。 */
 function render() {
   if (!state) return;
+  const current = space();
+  const app = document.getElementById("app");
+  app.classList.remove("space-skills", "space-keys", "space-app");
+  app.classList.add(`space-${current}`);
+  renderRail();
+  renderSideHead();
   renderNav();
   renderCloudCard();
   renderToolbar();
   renderContent();
   renderInspector();
   renderBatch();
-  document.getElementById("app").classList.toggle("inspecting", Boolean(ui.inspect));
+  // 详情面板和批量操作只属于技能空间
+  app.classList.toggle("inspecting", current === "skills" && Boolean(ui.inspect));
 }
 
 /** 切换视图，支持时用 View Transitions 做淡入。 */
 function go(view) {
   if (view === ui.view) return;
   const apply = () => {
+    if (space() === "skills") ui.skillView = ui.view;
     ui.view = view;
     ui.filter = "all";
     ui.selected.clear();
@@ -264,15 +281,54 @@ function go(view) {
   else apply();
 }
 
+/** 切换空间；回到技能空间时停在上次看的视图。 */
+function switchSpace(name) {
+  if (name === space()) return;
+  go(name === "keys" ? "keys" : name === "app" ? "app" : ui.skillView || "all");
+}
+
+// ============================================================ 渲染：最左边的空间切换栏
+
+/** 最左边一列：技能、密钥两个空间，底部是软件设置。 */
+function renderRail() {
+  const attention = [...items.values()].filter(needsAttention).length;
+  const failed = state.keys.failed;
+  const current = space();
+  // 任务栏标题带上待处理数量，窗口在后台也能看到
+  document.title = attention ? `(${attention}) Skillset` : "Skillset";
+  const button = (name, icon, label, badge, hint) => `
+    <button class="rail-btn ${current === name ? "on" : ""}" data-space="${name}" title="${esc(hint)}" aria-pressed="${current === name}">
+      <span class="rail-ico">${icon}${badge ? `<span class="rail-badge">${badge}</span>` : ""}</span><span class="rail-label">${label}</span></button>`;
+  document.getElementById("rail").innerHTML = `
+    <img class="rail-logo" src="icon.svg" alt="Skillset" title="Skillset ${Version}">
+    ${button("skills", I.stack, "技能", attention, "skill、插件、MCP 和全局规则")}
+    ${button("keys", I.key, "密钥", failed, failed ? `密钥 · ${failed} 条有失效的 key` : "API key、token 等密钥")}
+    <span class="grow"></span>
+    ${button("app", I.gear, "设置", state.update?.behind ? "新" : "", "软件更新、快捷键和关于")}`;
+}
+
+/** 侧栏顶部：当前空间的名字。 */
+function renderSideHead() {
+  const head = document.getElementById("sideHead");
+  if (space() === "keys") {
+    // 正在搜索时不重建，免得丢光标
+    if (document.activeElement?.id === "keySearch") return;
+    head.innerHTML = `<div class="side-title"><b>密钥</b><span>只存在本机，加密保存</span></div>
+      <div class="search side-search">${I.search}<input id="keySearch" class="field" placeholder="搜索名字、变量名、介绍" value="${esc(ui.keySearch)}" spellcheck="false"></div>`;
+    return;
+  }
+  head.innerHTML = `<div class="side-title"><b>技能</b><span>装到所有 AI 的 skill 与工具</span></div>`;
+}
+
 // ============================================================ 渲染：侧栏
 
 /** 侧栏导航。 */
 function renderNav() {
+  if (space() === "keys") return renderKeyNav();
+  if (space() === "app") return;
   const all = [...items.values()];
   const count = (fn) => all.filter(fn).length;
   const attention = count(needsAttention);
-  // 任务栏标题带上待处理数量，窗口在后台也能看到
-  document.title = attention ? `(${attention}) Skillset` : "Skillset";
   const navItem = (view, icon, name, n, extra = "") => `
     <div class="nav-item ${ui.view === view ? "active" : ""}" data-view="${esc(view)}" ${extra} role="button" tabindex="0">
       ${icon}<span class="name">${esc(name)}</span><span class="count">${n ?? ""}</span></div>`;
@@ -297,15 +353,19 @@ function renderNav() {
     ${navItem("agents", `<span class="ico" style="color:var(--purple)">${I.sparkle}</span>`, "AI 应用",
       state.agents.filter((agent) => agent.active).length)}
     ${navItem("rules", `<span class="ico" style="color:var(--orange)">${I.doc}</span>`, "全局规则", rulesPending() || "")}
-    <div class="nav-item ${ui.view === "keys" ? "active" : ""}" data-view="keys" role="button" tabindex="0">
-      <span class="ico" style="color:var(--orange)">${I.key}</span><span class="name">密钥</span>
-      <span class="count ${state.keys.failed ? "alert" : ""}" title="${state.keys.failed ? "有失效的 key" : ""}">${state.keys.failed || state.keys.count || ""}</span></div>
-    ${navItem("settings", `<span class="ico" style="color:var(--gray)">${I.gear}</span>`, "云端与设置", state.update?.behind ? "新" : "")}`;
+    ${navItem("settings", `<span class="ico" style="color:var(--blue)">${I.cloud}</span>`, "云端同步", "")}`;
 }
 
-/** 侧栏底部的云端状态卡片。 */
+/** 侧栏底部的状态卡片：技能空间显示云端状态，密钥空间提醒备份。 */
 function renderCloudCard() {
   const card = document.getElementById("cloudCard");
+  if (space() === "keys") {
+    card.className = "cloud local";
+    card.title = "导出备份";
+    card.innerHTML = `<span class="state-dot"></span><div class="txt"><b>加密存在本机</b><span>换电脑前记得导出备份</span></div>`;
+    return;
+  }
+  card.title = "云端同步";
   const git = state.git;
   let cls = "", head = "已和云端同步", sub = repoName(git.remote);
   if (git.error) {
@@ -313,7 +373,7 @@ function renderCloudCard() {
   } else if (!git.remote) {
     cls = "off"; head = "只在本机"; sub = "点这里连接 GitHub";
   } else if (git.ahead || git.dirty) {
-    cls = "warn"; head = `${git.ahead || ""} 个改动未推送`.trim();
+    cls = "warn"; head = git.ahead ? `${git.ahead} 个改动未推送` : "有改动未推送";
   } else if (git.behind) {
     cls = "warn"; head = `云端有 ${git.behind} 个更新`;
   }
@@ -366,19 +426,22 @@ function renderToolbar() {
     heading = "AI 应用";
     subtitle = "选择要把 skill 装到哪些 AI";
   } else if (ui.view === "settings") {
-    heading = "云端与设置";
-    subtitle = "";
+    heading = "云端同步";
+    subtitle = "skill 库存在你自己的 GitHub 仓库里，换电脑也能一键装回";
+  } else if (ui.view === "app") {
+    heading = "软件设置";
+    subtitle = `Skillset ${Version}`;
   } else if (ui.view === "keys") {
     heading = "密钥";
-    subtitle = `${state.keys.count} 条` + (state.keys.failed ? ` · ${state.keys.failed} 条有失效的 key` : "") + " · 只存在本机，加密保存";
+    subtitle = `${state.keys.count} 条` + (state.keys.failed ? ` · ${state.keys.failed} 条有失效的 key` : "");
     extra = `<button class="btn" data-act="key-menu">${I.cloudDown}导入${I.chev}</button>
       <button class="btn" data-act="key-export" title="用密码加密导出，换电脑时导回来">${I.cloudUp}导出备份</button>
       <button class="btn primary" data-act="key-new">${I.plus}新建密钥</button>`;
   }
 
-  const listView = !["agents", "settings", "rules", "keys"].includes(ui.view);
-  // 密钥页和 skill 无关，不放扫描、更新、同步这些按钮
-  const skillTools = ui.view === "keys" ? "" : `
+  const listView = space() === "skills" && !["agents", "settings", "rules"].includes(ui.view);
+  // 扫描、更新、同步只属于技能空间
+  const skillTools = space() !== "skills" ? "" : `
     <button class="btn icon ghost" data-act="rescan" title="重新扫描本机（F5）">${I.rescan}</button>
     <button class="btn" data-act="update" title="从云端拉取最新内容并装到本机">${I.cloudDown}更新</button>
     <button class="btn primary" data-act="sync" title="把启用的 skill 装到所有选中的 AI，关闭的删掉">${I.sync}同步到所有 AI</button>
@@ -444,6 +507,7 @@ function renderContent() {
   const content = document.getElementById("content");
   if (ui.view === "agents") return swap(content, renderAgents());
   if (ui.view === "settings") return swap(content, renderSettings());
+  if (ui.view === "app") return swap(content, renderAppSettings());
   if (ui.view === "keys") return swap(content, renderKeys());
   if (ui.view === "rules") {
     // 正在输入时不重建，避免丢光标
@@ -584,19 +648,17 @@ function agentColor(name) {
 
 // ============================================================ 渲染：设置页
 
-/** 云端与设置页。 */
+/** 技能空间的「云端同步」页：云端仓库和扫描的目录。 */
 function renderSettings() {
   const git = state.git;
   const cfg = state.config;
   const connected = Boolean(git.remote);
   const statusText = git.error ? git.error : !connected ? "skill 只保存在这台电脑上。连接 GitHub 私有仓库后，换电脑也能一键装回。"
-    : git.ahead || git.dirty ? `有 ${git.ahead || "新"} 个改动还没推送` : git.behind ? `云端有 ${git.behind} 个更新，点「更新」拉取` : "本机和云端一致";
+    : git.ahead ? `有 ${git.ahead} 个改动还没推送` : git.dirty ? "有改动还没推送" : git.behind ? `云端有 ${git.behind} 个更新，点「更新」拉取` : "本机和云端一致";
   const dirs = state.dirs.map((dir) => `<div class="list-row">
       <div class="lbl"><b>${esc(dir.label)}</b><span class="mono" title="${esc(dir.path)}">${esc(dir.path)}</span></div>
       ${dir.install ? '<span class="chip ok">安装目标</span>' : ""}${dir.legacy ? '<span class="chip warn">旧目录</span>' : ""}
       ${dir.exists ? `<button class="btn sm" data-act="open" data-path="${esc(dir.path)}">${I.folder}打开</button>` : '<span class="chip plain">还没创建</span>'}</div>`).join("");
-  const keys = [["Ctrl K", "命令面板：搜索条目、执行操作"], ["Ctrl F", "搜索"], ["↑ ↓", "在列表中移动"], ["空格", "启用 / 关闭"],
-    ["Enter", "打开详情"], ["Delete", "彻底删除"], ["Ctrl A", "全选当前列表"], ["Esc", "关闭面板 / 取消选择"], ["F5", "重新扫描"]];
   return `<div class="page">
     <div class="section-title">云端仓库</div>
     <div class="card">
@@ -616,17 +678,24 @@ function renderSettings() {
     <div class="section-title">扫描的目录</div>
     <div class="card">${dirs}</div>
     <div class="section-foot">「重复」指旧目录和新目录里各有一份，同一个 AI 会读到两次，可以在右上角菜单里一键清理。</div>
+  </div>`;
+}
 
-    <div class="section-title">键盘快捷键</div>
-    <div class="card">${keys.map(([key, text]) => `<div class="list-row"><div class="lbl">${esc(text)}</div><span class="kbd">${esc(key)}</span></div>`).join("")}</div>
-
+/** 「软件设置」页：更新、快捷键和关于，不属于技能也不属于密钥。 */
+function renderAppSettings() {
+  const keys = [["Ctrl K", "命令面板：在当前空间里搜索、执行操作"], ["Ctrl F", "搜索"], ["↑ ↓", "在列表中移动"], ["空格", "启用 / 关闭（技能）"],
+    ["Enter", "打开详情（技能）"], ["Delete", "彻底删除（技能）"], ["Ctrl A", "全选当前列表（技能）"], ["Esc", "关闭面板 / 取消选择"], ["F5", "重新读取"]];
+  return `<div class="page">
     <div class="section-title">关于</div>
     <div class="card"><div class="cloud-hero">
       <img src="icon.svg" alt="" style="width:52px;height:52px">
-      <div class="grow"><h3>Skillset ${Version}</h3><p>开源的 AI skill 与插件管理器 · MIT 许可</p></div>
+      <div class="grow"><h3>Skillset ${Version}</h3><p>开源的 AI skill 与密钥管理器 · MIT 许可</p></div>
       <a class="btn" href="${RepoUrl}" target="_blank" rel="noopener">${I.link}GitHub</a></div>
       ${updateRowHtml()}</div>
     <div class="section-foot">每 6 小时自动查一次有没有新版本。</div>
+
+    <div class="section-title">键盘快捷键</div>
+    <div class="card">${keys.map(([key, text]) => `<div class="list-row"><div class="lbl">${esc(text)}</div><span class="kbd">${esc(key)}</span></div>`).join("")}</div>
   </div>`;
 }
 
@@ -795,6 +864,7 @@ async function saveField(element) {
       tick.classList.add("show");
       setTimeout(() => tick.classList.remove("show"), 1400);
     }
+    renderRail();
     renderNav();
     renderContent();
     if (field === "group") refresh();
@@ -1164,8 +1234,8 @@ function noticeUpdate(update) {
   const had = state.update?.behind;
   state.update = update;
   if (Boolean(update.behind) !== Boolean(had)) {
-    renderNav();
-    if (ui.view === "settings") renderContent();
+    renderRail();
+    if (ui.view === "app") renderContent();
   }
   if (!update.behind || ui.updateNotified || document.hidden) return;
   ui.updateNotified = true;
@@ -1357,7 +1427,8 @@ async function openPath(path) {
 /** Ctrl+K 命令面板：搜索条目、分组和操作。 */
 function openPalette() {
   if (document.querySelector("dialog.palette")) return;
-  const commands = [
+  // 两个空间互不相干：在密钥空间只搜密钥
+  const commands = space() === "keys" ? keyCommands() : [
     { section: "操作", label: "同步到所有 AI", icon: I.sync, run: Actions.sync },
     { section: "操作", label: "从云端更新", icon: I.cloudDown, run: Actions.update },
     { section: "操作", label: "上传全部改动", icon: I.cloudUp, run: Actions.uploadAll },
@@ -1371,14 +1442,16 @@ function openPalette() {
     { section: "前往", label: "全局规则", icon: I.doc, run: () => go("rules") },
     { section: "前往", label: "需要处理", icon: I.alert, run: () => go("attention") },
     { section: "前往", label: "AI 应用", icon: I.sparkle, run: () => go("agents") },
-    { section: "前往", label: "云端与设置", icon: I.gear, run: () => go("settings") },
+    { section: "前往", label: "云端同步", icon: I.cloud, run: () => go("settings") },
+    { section: "前往", label: "密钥", icon: I.key, run: () => switchSpace("keys") },
+    { section: "前往", label: "软件设置", icon: I.gear, run: () => switchSpace("app") },
     ...state.groups.map((group) => ({ section: "分组", label: group.name, icon: `<span class="dot" style="width:9px;height:9px;border-radius:50%;background:${groupColor(group.id)}"></span>`, run: () => go(`group:${group.id}`) })),
     ...[...items.values()].map((item) => ({ section: { skill: "Skill", plugin: "插件", mcp: "MCP" }[item.kind], label: title(item), hint: item.id,
       text: `${item.note} ${item.description}`, icon: avatarHtml(item).html,
       run: () => reveal(item.key) })),
   ];
   let list = [], active = 0;
-  sheet(`<div class="palette-input">${I.search}<input placeholder="搜索 skill、分组或操作…" spellcheck="false" autofocus></div>
+  sheet(`<div class="palette-input">${I.search}<input placeholder="${space() === "keys" ? "搜索密钥或操作…" : "搜索 skill、分组或操作…"}" spellcheck="false" autofocus></div>
     <div class="palette-list" role="listbox"></div>
     <div class="palette-foot"><span><span class="kbd">↑↓</span> 选择</span><span><span class="kbd">Enter</span> 打开</span><span><span class="kbd">Esc</span> 关闭</span></div>`,
   "palette", (dialog, close) => {
@@ -1657,10 +1730,19 @@ document.addEventListener("click", (event) => {
   const target = event.target;
   if (!target.closest(".menu")) closeMenu();
 
-  // 侧栏导航
+  // 空间切换、侧栏导航
+  const spaceButton = target.closest("[data-space]");
+  if (spaceButton) return switchSpace(spaceButton.dataset.space);
   const nav = target.closest("[data-view]");
   if (nav && !target.closest("[data-act]")) return go(nav.dataset.view);
-  if (target.closest("#cloudCard")) return go("settings");
+  const keyItem = target.closest("[data-key-sel]");
+  if (keyItem) return selectKey(keyItem.dataset.keySel);
+  const keyFilter = target.closest("[data-key-filter]");
+  if (keyFilter) {
+    ui.keyFilter = keyFilter.dataset.keyFilter;
+    return renderKeyNav();
+  }
+  if (target.closest("#cloudCard")) return space() === "keys" ? KeyActions["key-export"]() : go("settings");
 
   // 分段筛选
   const filter = target.closest("[data-filter]");
@@ -1785,6 +1867,10 @@ document.addEventListener("input", (event) => {
     document.querySelector('[data-act="rules-apply"]')?.toggleAttribute("disabled", dirty || !state.rules.inCloud);
     return;
   }
+  if (event.target.id === "keySearch") {
+    ui.keySearch = event.target.value;
+    return renderKeyNav();
+  }
   if (event.target.id !== "search") return;
   ui.search = event.target.value;
   // 搜索时不播放入场动画，保证输入跟手
@@ -1881,10 +1967,10 @@ document.addEventListener("keydown", (event) => {
   if (inDialog) return;
   if (event.key === "F5" || (ctrl && event.key.toLowerCase() === "r")) {
     event.preventDefault();
-    return Actions.rescan();
+    return space() === "keys" ? loadKeys() : space() === "skills" ? Actions.rescan() : refresh();
   }
   if ((ctrl && event.key.toLowerCase() === "f") || (event.key === "/" && !typing)) {
-    const search = document.getElementById("search");
+    const search = document.getElementById(space() === "keys" ? "keySearch" : "search");
     if (search) {
       event.preventDefault();
       search.focus();
@@ -1899,6 +1985,10 @@ document.addEventListener("keydown", (event) => {
         document.activeElement.value = "";
         ui.search = "";
         renderContent();
+      } else if (document.activeElement.id === "keySearch" && ui.keySearch) {
+        document.activeElement.value = "";
+        ui.keySearch = "";
+        renderKeyNav();
       } else document.activeElement.blur();
       return;
     }
@@ -1909,6 +1999,16 @@ document.addEventListener("keydown", (event) => {
     if (ui.inspect) return closeInspector();
     return;
   }
+  // 密钥空间只有上下切换选中的那条，技能的快捷键不在这里生效
+  if (space() === "keys") {
+    if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+      if (typing && document.activeElement.id !== "keySearch") return;
+      event.preventDefault();
+      moveKeySel(event.key === "ArrowDown" ? 1 : -1);
+    }
+    return;
+  }
+  if (space() === "app") return;
   if (typing) {
     // 搜索框里按 ↓ 进入列表
     if (document.activeElement.id === "search" && event.key === "ArrowDown") {
@@ -1953,10 +2053,12 @@ function moveFocus(step) {
 
 // 侧栏条目支持键盘回车
 document.getElementById("nav").addEventListener("keydown", (event) => {
-  if (event.key === "Enter" && event.target.dataset.view) go(event.target.dataset.view);
+  if (event.key !== "Enter") return;
+  if (event.target.dataset.view) go(event.target.dataset.view);
+  if (event.target.dataset.keySel) selectKey(event.target.dataset.keySel);
 });
 document.getElementById("cloudCard").addEventListener("keydown", (event) => {
-  if (event.key === "Enter") go("settings");
+  if (event.key === "Enter") event.target.click();
 });
 // 滚动或窗口变化时关闭菜单
 document.getElementById("content").addEventListener("scroll", closeMenu, { passive: true });

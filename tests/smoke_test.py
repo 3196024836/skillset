@@ -151,6 +151,7 @@ def main() -> None:
     test_mcp_rules(service, home, UserError)
     test_keys(service)
     test_netproxy()
+    test_runtime_skip()
     test_updater()
     service.push()
 
@@ -454,6 +455,24 @@ def test_netproxy() -> None:
             check(netproxy.network_env({"HTTPS_PROXY": "http://mine:1"})["HTTPS_PROXY"] == "http://mine:1", "不覆盖用户自己的代理")
     finally:
         netproxy._system_proxy = saved
+
+
+def test_runtime_skip() -> None:
+    """skill 里本机装的运行环境不跟着复制，目标里已有的也不删。"""
+    import tempfile
+    from skillfs import copy_skill, dir_hash
+    with tempfile.TemporaryDirectory(dir=Path.home() / "Downloads") as tmp:
+        source, target = Path(tmp) / "src", Path(tmp) / "dst"
+        (source / ".runtime" / "Lib").mkdir(parents=True)
+        (source / ".runtime" / "Lib" / "big.py").write_text("x")
+        (source / "SKILL.md").write_text("new")
+        (target / ".runtime").mkdir(parents=True)
+        (target / ".runtime" / "keep.txt").write_text("mine")
+        (target / "old.md").write_text("old")
+        copy_skill(source, target)
+        check((target / "SKILL.md").read_text() == "new" and not (target / "old.md").exists(), "复制后内容和源一致")
+        check((target / ".runtime" / "keep.txt").exists() and not (target / ".runtime" / "Lib").exists(), "运行环境不复制也不删")
+        check(dir_hash(source) == dir_hash(target), "运行环境不影响指纹")
 
 
 def test_updater() -> None:

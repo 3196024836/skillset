@@ -16,6 +16,7 @@ import subprocess
 from pathlib import Path
 
 from netproxy import git_env
+from skillfs import SkipNames
 
 # 清单格式版本
 ManifestVersion = 1
@@ -153,12 +154,23 @@ class Library:
         :param message: 提交说明
         :returns: 有改动并已提交返回 True，没有改动返回 False
         """
+        self._exclude_runtime()
         self.git("add", "-A")
         # 暂存区和 HEAD 一样（退出码 0）说明没有改动；还没有提交过时 HEAD 不存在，直接提交
         if self.has_commits() and self._run("diff", "--cached", "--quiet").returncode == 0:
             return False
         self.git("commit", "-m", message)
         return True
+
+    def _exclude_runtime(self) -> None:
+        """把 skill 的运行环境、缓存写进本地排除列表，免得被提交到库里。"""
+        exclude = self.path / ".git" / "info" / "exclude"
+        if not exclude.parent.is_dir():
+            return
+        text = exclude.read_text(encoding="utf-8") if exclude.exists() else ""
+        missing = [name for name in sorted(SkipNames) if name != ".git" and name not in text.splitlines()]
+        if missing:
+            exclude.write_text(text.rstrip("\n") + "\n" + "\n".join(missing) + "\n", encoding="utf-8")
 
     def has_commits(self) -> bool:
         """判断仓库是否已有提交。

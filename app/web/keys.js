@@ -1,5 +1,6 @@
 /**
- * 「密钥」页：每条密钥有名字、说明、环境变量名和按顺序排的多个 key（第一个没失效的在用）。
+ * 密钥空间：和技能完全分开。侧栏是密钥列表（搜索、筛选），主区是选中那条的详情和用法。
+ * 每条密钥有名字、说明、环境变量名和按顺序排的多个 key（第一个没失效的在用）。
  * 明文只在点「显示」「复制」时向后端要一次，不存在页面状态里。
  * 用到 app.js 里的 api / sheet / confirmAlert / promptSheet / toast / esc / I / ui / task / confirmed。
  * 列表跟着 app.js 的 refresh 刷新：keys.dat 变了，指纹就变。
@@ -10,36 +11,130 @@
 // 显示的明文多久后自动藏回去（毫秒）
 const RevealMs = 30000;
 
-/** 读取密钥列表（不含明文），在「密钥」页时重画。 */
+/** 读取密钥列表（不含明文），在密钥空间时重画列表和详情。 */
 async function loadKeys() {
   try {
     ui.keys = await api("/api/keys/list");
   } catch (error) {
     ui.keys = { entries: [], error: error.message };
   }
-  if (ui.view === "keys") renderContent();
+  if (ui.view !== "keys") return;
+  renderKeyNav();
+  renderContent();
 }
 
-/** 「密钥」页内容。 */
+/** 一条密钥里失效的 key 数。 */
+function failedCount(entry) {
+  return entry.keys.filter((key) => key.status === "failed").length;
+}
+
+/** 按搜索词和筛选过滤后的密钥。 */
+function visibleEntries() {
+  const words = ui.keySearch.toLowerCase().split(/\s+/).filter(Boolean);
+  return (ui.keys?.entries || []).filter((entry) => {
+    if (ui.keyFilter === "failed" && !failedCount(entry) && entry.activeId) return false;
+    const text = `${entry.name} ${entry.env} ${entry.note}`.toLowerCase();
+    return words.every((word) => text.includes(word));
+  });
+}
+
+/** 当前选中的密钥：选中的被删了或被筛掉了，就选列表里第一条。 */
+function selectedEntry() {
+  const list = visibleEntries();
+  return list.find((entry) => entry.id === ui.keySel) || list[0] || null;
+}
+
+/** 选中一条密钥。 */
+function selectKey(id) {
+  ui.keySel = id;
+  renderKeyNav();
+  renderContent();
+  document.getElementById("content").scrollTop = 0;
+}
+
+/** 键盘上下切换选中的密钥。 */
+function moveKeySel(step) {
+  const list = visibleEntries();
+  if (!list.length) return;
+  const index = list.findIndex((entry) => entry.id === selectedEntry()?.id);
+  selectKey(list[Math.max(0, Math.min(list.length - 1, index + step))].id);
+  document.querySelector(".key-item.on")?.scrollIntoView({ block: "nearest" });
+}
+
+/** 密钥空间的侧栏：筛选和密钥列表。 */
+function renderKeyNav() {
+  const nav = document.getElementById("nav");
+  const data = ui.keys;
+  if (!data) {
+    nav.innerHTML = '<div class="empty-row">正在读取…</div>';
+    return;
+  }
+  const all = data.entries;
+  const failed = all.filter((entry) => failedCount(entry) || !entry.activeId).length;
+  const list = visibleEntries();
+  const current = selectedEntry();
+  const tab = (key, name, n) => `<button class="key-tab ${ui.keyFilter === key ? "on" : ""}" data-key-filter="${key}">${name}<span>${n}</span></button>`;
+  const rows = list.map((entry) => {
+    const bad = !entry.activeId ? "danger" : failedCount(entry) ? "warn" : "ok";
+    return `<div class="key-item ${entry.id === current?.id ? "on" : ""}" data-key-sel="${esc(entry.id)}" role="button" tabindex="0">
+      <span class="key-avatar sm" style="--c:${agentColor(entry.name)}">${esc([...entry.name][0]?.toUpperCase() || "?")}</span>
+      <div class="key-item-txt"><b>${esc(entry.name)}</b><span>${esc(entry.env || entry.note || "没写介绍")}</span></div>
+      <span class="key-dot ${bad}" title="${{ ok: "正常", warn: "有失效的 key", danger: "没有可用的 key" }[bad]}"></span>
+      <span class="key-count">${entry.keys.length}</span></div>`;
+  }).join("");
+  nav.innerHTML = `<div class="key-tabs">${tab("all", "全部", all.length)}${tab("failed", "有失效", failed)}</div>
+    ${rows || `<div class="empty-row">${ui.keySearch ? "没有匹配的密钥" : ui.keyFilter === "failed" ? "没有失效的 key" : "还没有密钥"}</div>`}`;
+}
+
+/** 密钥空间的主区：选中那条密钥的详情。 */
 function renderKeys() {
   const data = ui.keys;
   if (!data) return `<div class="page"><div class="empty-row">正在读取…</div></div>`;
   if (data.error) return emptyHtml(I.key, "读不到密钥", data.error);
-  const help = `<details class="key-help"><summary>怎么给 AI 和脚本用</summary>
-    <p><code>python app/keycli.py run 名字 -- 命令</code> 只把在用的 key 交给这个命令，不写进系统；认证失败会自动标成失效、换下一个 key 重跑。</p>
-    <p><code>keycli.py add 名字 --env 变量名 --clipboard</code> 把剪贴板里的 key 加进来（已有这条就加成备用）；<code>keycli.py list</code> 看有哪些。</p>
-    <p>密钥用 Windows 加密存在本机 data/keys.dat，只有这台电脑、你这个账户能解开。换电脑解不开，记得「导出备份」存到网盘或 U 盘。</p></details>`;
   if (!data.entries.length) {
-    return `<div class="page">${emptyHtml(I.key, "还没有密钥", "点右上角「新建密钥」，或用「导入」把 KeePassXC 导出的 CSV 导进来。")}${help}</div>`;
+    return `<div class="key-empty">${emptyHtml(I.key, "还没有密钥", "点右上角「新建密钥」，或用「导入」把 KeePassXC 导出的 CSV 或备份文件导进来。")}
+      ${usageHtml(null)}</div>`;
   }
-  return `<div class="page key-page">${data.entries.map(keyCardHtml).join("")}${help}</div>`;
+  const entry = selectedEntry();
+  if (!entry) return emptyHtml(I.search, "没有匹配的密钥", "换个搜索词或筛选试试。");
+  return `<div class="page key-page">${keyCardHtml(entry)}${usageHtml(entry)}</div>`;
 }
 
-/** 一条密钥的卡片：头部是名字、变量名和状态，下面按使用顺序列出 key。 */
+/** 「怎么用」卡片：给 AI 和脚本用的命令，名字换成这条密钥的。 */
+function usageHtml(entry) {
+  const cli = ui.keys?.cli || "app/keycli.py";
+  const name = entry ? (/\s/.test(entry.name) ? `"${entry.name}"` : entry.name) : "名字";
+  const env = entry?.env || "变量名";
+  const line = (text, command) => `<div class="usage-row"><span>${esc(text)}</span>
+    <div class="usage-cmd"><code>${esc(command)}</code><button class="btn ghost icon sm" data-act="copy-text" data-text="${esc(command)}" title="复制命令">${I.copy}</button></div></div>`;
+  return `<div class="section-title">怎么给 AI 和脚本用</div>
+    <div class="card usage">
+      ${line("把在用的 key 交给一个命令（不写进系统，认证失败自动换下一个）", `python ${cli} run ${name} -- 命令`)}
+      ${line("把剪贴板里的 key 加进来（已有这条就加成备用）", `python ${cli} add ${name} --env ${env} --clipboard`)}
+      ${line("列出所有密钥（不显示明文）", `python ${cli} list`)}
+    </div>
+    <div class="section-foot">密钥用 Windows 加密存在本机 data/keys.dat，只有这台电脑、你这个账户能解开。换电脑解不开，记得「导出备份」存到网盘或 U 盘。</div>`;
+}
+
+/** 密钥空间的命令面板：密钥和密钥相关的操作。 */
+function keyCommands() {
+  return [
+    { section: "操作", label: "新建密钥", icon: I.plus, run: () => editKey() },
+    { section: "操作", label: "导出备份", icon: I.cloudUp, run: KeyActions["key-export"] },
+    { section: "操作", label: "从备份文件导入", icon: I.cloudDown, run: KeyActions["key-import-backup"] },
+    { section: "操作", label: "从 KeePassXC 的 CSV 导入", icon: I.doc, run: KeyActions["key-import-csv"] },
+    { section: "前往", label: "技能", icon: I.stack, run: () => switchSpace("skills") },
+    { section: "前往", label: "软件设置", icon: I.gear, run: () => switchSpace("app") },
+    ...(ui.keys?.entries || []).map((entry) => ({ section: "密钥", label: entry.name, hint: entry.env, text: entry.note, icon: I.key,
+      run: () => { ui.keySearch = ""; ui.keyFilter = "all"; renderSideHead(); selectKey(entry.id); } })),
+  ];
+}
+
+/** 一条密钥的详情卡片：头部是名字、变量名和状态，下面按使用顺序列出 key。 */
 function keyCardHtml(entry) {
-  const failed = entry.keys.filter((key) => key.status === "failed").length;
+  const failed = failedCount(entry);
   const status = !entry.activeId ? '<span class="chip danger">没有可用的 key</span>'
-    : failed ? `<span class="chip warn">${failed} 个失效</span>` : "";
+    : failed ? `<span class="chip warn">${failed} 个失效</span>` : '<span class="chip ok">正常</span>';
   const rows = entry.keys.map((key, index) => {
     const isFailed = key.status === "failed";
     const chip = isFailed ? '<span class="chip warn">失效</span>'
@@ -59,14 +154,16 @@ function keyCardHtml(entry) {
           ${isFailed ? `<button class="btn sm" data-act="key-restore" ${ids}>恢复</button>`
             : `<button class="btn sm" data-act="key-fail" ${ids} title="这个 key 不好使了，以后用下一个">标为失效</button>`}</div></div>`;
   }).join("");
-  return `<section class="card key-card">
-      <header class="key-card-head">
-        <span class="key-avatar">${esc([...entry.name][0]?.toUpperCase() || "?")}</span>
-        <div class="key-title"><div><b>${esc(entry.name)}</b>${entry.env ? `<code>${esc(entry.env)}</code>` : ""}${status}</div>
-          ${entry.note ? `<p>${esc(entry.note)}</p>` : ""}</div>
-        <button class="btn ghost icon sm" data-act="key-edit" data-id="${esc(entry.id)}" title="编辑">${I.pencil}</button>
-        <button class="btn ghost icon sm" data-act="key-delete" data-id="${esc(entry.id)}" title="删除">${I.trash}</button>
-      </header>${rows}</section>`;
+  return `<header class="key-hero">
+      <span class="key-avatar lg" style="--c:${agentColor(entry.name)}">${esc([...entry.name][0]?.toUpperCase() || "?")}</span>
+      <div class="key-title"><div><h2>${esc(entry.name)}</h2>${status}</div>
+        ${entry.env ? `<code title="命令行注入时用的环境变量名">${esc(entry.env)}</code>` : '<span class="faint">没设环境变量名</span>'}
+        <p class="${entry.note ? "" : "faint"}">${esc(entry.note || "没写介绍")}</p></div>
+      <button class="btn" data-act="key-edit" data-id="${esc(entry.id)}">${I.pencil}编辑</button>
+      <button class="btn ghost icon" data-act="key-delete" data-id="${esc(entry.id)}" title="删除这条密钥">${I.trash}</button>
+    </header>
+    <div class="section-title">key<span class="faint">从上到下依次使用，前面的失效了就用后面的</span></div>
+    <section class="card key-card">${rows}</section>`;
 }
 
 /** 新建或编辑一条密钥的弹窗。已有的 key 不回填明文：留空表示不改。 */
@@ -134,7 +231,12 @@ async function editKey(entryId = "") {
     });
   });
   if (result !== "ok") return;
-  await task("保存密钥", () => api("/api/keys/save", { fields }));
+  await task("保存密钥", async () => {
+    const saved = await api("/api/keys/save", { fields });
+    // 新建的（或合并进去的）那条选中，保存完马上能看到
+    if (saved.id) ui.keySel = saved.id;
+    return saved;
+  });
 }
 
 /** 取一个 key 的明文。 */
@@ -187,6 +289,14 @@ const KeyActions = {
     try {
       await navigator.clipboard.writeText(await keyValue(actor));
       toast("已复制。用完记得别贴到聊天或代码里");
+    } catch (error) {
+      toast(`复制失败：${error.message}`, { type: "err" });
+    }
+  },
+  "copy-text": async (actor) => {
+    try {
+      await navigator.clipboard.writeText(actor.dataset.text);
+      toast("命令已复制");
     } catch (error) {
       toast(`复制失败：${error.message}`, { type: "err" });
     }

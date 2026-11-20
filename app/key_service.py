@@ -3,6 +3,7 @@
 """
 
 import time
+from pathlib import Path
 
 import config as cfg
 from keystore import KeyStoreError
@@ -14,12 +15,13 @@ class KeyMixin:
     def keys_list(self) -> dict:
         """全部密钥，key 只露末 4 位。
 
-        :returns: {"entries", "error"}
+        :returns: {"entries", "error", "cli"}，cli 是 keycli.py 的完整路径，界面上拼用法示例
         """
+        cli = str(Path(__file__).with_name("keycli.py"))
         try:
-            return {"entries": self.keys.list_masked(), "error": ""}
+            return {"entries": self.keys.list_masked(), "error": "", "cli": cli}
         except (KeyStoreError, ValueError) as error:
-            return {"entries": [], "error": str(error)}
+            return {"entries": [], "error": str(error), "cli": cli}
 
     def keys_save(self, fields: dict) -> dict:
         """新建或修改一条密钥。"""

@@ -14,8 +14,9 @@ import shutil
 import stat
 from pathlib import Path
 
-# 复制和计算指纹时忽略的文件名
-SkipNames = {".git", "__pycache__", ".DS_Store", "Thumbs.db"}
+# 复制和计算指纹时忽略的文件名。.runtime、.venv、venv、node_modules 是 skill 在本机装的运行环境，
+# 能重建、体积大、路径常超过 Windows 长度上限，不跟着同步
+SkipNames = {".git", "__pycache__", ".DS_Store", "Thumbs.db", ".runtime", ".venv", "venv", "node_modules"}
 
 # 密钥特征：名称 -> 正则
 SecretPatterns = {
@@ -190,16 +191,22 @@ def remove_dir(path: Path) -> None:
 
 
 def copy_skill(source: Path, target: Path) -> None:
-    """把 skill 完整复制到目标位置，目标已存在则先删除再复制。
+    """把 skill 复制到目标位置，替换目标原有内容；目标里本机的运行环境（SkipNames）保留不动。
 
     :param source: 源 skill 文件夹
     :param target: 目标 skill 文件夹
     """
     if source.resolve() == target.resolve():
         return
-    remove_dir(target)
+    if target.is_symlink() or (hasattr(target, "is_junction") and target.is_junction()) or not target.is_dir():
+        remove_dir(target)
+    else:
+        for child in target.iterdir():
+            if child.name in SkipNames:
+                continue
+            remove_dir(child) if child.is_dir() and not child.is_symlink() else child.unlink()
     target.parent.mkdir(parents=True, exist_ok=True)
-    shutil.copytree(source, target, ignore=shutil.ignore_patterns(*SkipNames))
+    shutil.copytree(source, target, ignore=shutil.ignore_patterns(*SkipNames), dirs_exist_ok=True)
 
 
 def scan_secrets(root: Path) -> list:
