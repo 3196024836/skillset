@@ -2,7 +2,7 @@
  * Skillset 界面样式
  * 设计参数参考 Apple HIG（系统色、macOS 字号与字距），深浅色跟随系统。
  * 结构：空间切换栏 | 侧栏（毛玻璃） | 主区 | 详情面板；弹窗、提示条、命令面板浮在最上层。
- * 技能和密钥是两个互不相干的空间，靠 .app 上的 space-skills / space-keys / space-app 区分。
+ * 技能和密钥是两个互不相干的空间，靠 .app 上的 space-skills / space-keys / space-rules / space-app 区分。
  */
 
 /* ============================================================ 设计参数 */
@@ -231,8 +231,8 @@ select.field { appearance: none; padding-right: 28px; background-image: url("dat
 }
 .app.inspecting { grid-template-columns: var(--rail-w) var(--sidebar-w) 1fr var(--inspector-w); }
 .app.space-keys { --sidebar-w: 272px; }
-.app.space-app { --sidebar-w: 0px; }
-.app.space-app .sidebar { visibility: hidden; }
+.app.space-app, .app.space-rules { --sidebar-w: 0px; }
+.app.space-app .sidebar, .app.space-rules .sidebar { visibility: hidden; }
 
 /* ---------- 空间切换栏 ---------- */
 

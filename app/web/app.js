@@ -69,7 +69,7 @@ const McpColor = "#30B0C7";
 
 // 界面状态
 const ui = {
-  view: "all",                 // 技能：all | attention | plugins | mcps | group:<id> | ungrouped | agents | rules | settings；密钥：keys；软件设置：app
+  view: "all",                 // 技能：all | attention | plugins | mcps | group:<id> | ungrouped | agents | settings；密钥：keys；全局规则：rules；软件设置：app
   skillView: "all",            // 离开技能空间前停在哪个视图，切回来时回到那里
   filter: "all",
   search: "",
@@ -146,7 +146,7 @@ function avatarHtml(item) {
 
 /** 当前所在的空间：技能和密钥互不相干，软件设置单独一页。 */
 function space() {
-  return ui.view === "keys" ? "keys" : ui.view === "app" ? "app" : "skills";
+  return ["keys", "rules", "app"].includes(ui.view) ? ui.view : "skills";
 }
 
 /** 规则文件里和正本不一致的数量（侧栏提示用）。 */
@@ -250,7 +250,7 @@ function render() {
   if (!state) return;
   const current = space();
   const app = document.getElementById("app");
-  app.classList.remove("space-skills", "space-keys", "space-app");
+  app.classList.remove("space-skills", "space-keys", "space-rules", "space-app");
   app.classList.add(`space-${current}`);
   renderRail();
   renderSideHead();
@@ -284,12 +284,12 @@ function go(view) {
 /** 切换空间；回到技能空间时停在上次看的视图。 */
 function switchSpace(name) {
   if (name === space()) return;
-  go(name === "keys" ? "keys" : name === "app" ? "app" : ui.skillView || "all");
+  go(name === "skills" ? ui.skillView || "all" : name);
 }
 
 // ============================================================ 渲染：最左边的空间切换栏
 
-/** 最左边一列：技能、密钥两个空间，底部是软件设置。 */
+/** 最左边一列：技能、密钥、全局规则三个空间，底部是软件设置。 */
 function renderRail() {
   const attention = [...items.values()].filter(needsAttention).length;
   const failed = state.keys.failed;
@@ -301,8 +301,9 @@ function renderRail() {
       <span class="rail-ico">${icon}${badge ? `<span class="rail-badge">${badge}</span>` : ""}</span><span class="rail-label">${label}</span></button>`;
   document.getElementById("rail").innerHTML = `
     <img class="rail-logo" src="icon.svg" alt="Skillset" title="Skillset ${Version}">
-    ${button("skills", I.stack, "技能", attention, "skill、插件、MCP 和全局规则")}
+    ${button("skills", I.stack, "技能", attention, "skill、插件和 MCP 工具")}
     ${button("keys", I.key, "密钥", failed, failed ? `密钥 · ${failed} 条有失效的 key` : "API key、token 等密钥")}
+    ${button("rules", I.doc, "规则", rulesPending(), "写到所有 AI 的全局规则")}
     <span class="grow"></span>
     ${button("app", I.gear, "设置", state.update?.behind ? "新" : "", "软件更新、快捷键和关于")}`;
 }
@@ -325,7 +326,7 @@ function renderSideHead() {
 /** 侧栏导航。 */
 function renderNav() {
   if (space() === "keys") return renderKeyNav();
-  if (space() === "app") return;
+  if (space() === "app" || space() === "rules") return;
   const all = [...items.values()];
   const count = (fn) => all.filter(fn).length;
   const attention = count(needsAttention);
@@ -352,7 +353,6 @@ function renderNav() {
     <div class="nav-title">设置</div>
     ${navItem("agents", `<span class="ico" style="color:var(--purple)">${I.sparkle}</span>`, "AI 应用",
       state.agents.filter((agent) => agent.active).length)}
-    ${navItem("rules", `<span class="ico" style="color:var(--orange)">${I.doc}</span>`, "全局规则", rulesPending() || "")}
     ${navItem("settings", `<span class="ico" style="color:var(--blue)">${I.cloud}</span>`, "云端同步", "")}`;
 }
 
@@ -439,7 +439,7 @@ function renderToolbar() {
       <button class="btn primary" data-act="key-new">${I.plus}新建密钥</button>`;
   }
 
-  const listView = space() === "skills" && !["agents", "settings", "rules"].includes(ui.view);
+  const listView = space() === "skills" && !["agents", "settings"].includes(ui.view);
   // 扫描、更新、同步只属于技能空间
   const skillTools = space() !== "skills" ? "" : `
     <button class="btn icon ghost" data-act="rescan" title="重新扫描本机（F5）">${I.rescan}</button>
@@ -1439,7 +1439,7 @@ function openPalette() {
     { section: "前往", label: "全部", icon: I.stack, run: () => go("all") },
     { section: "前往", label: "插件", icon: I.puzzle, run: () => go("plugins") },
     { section: "前往", label: "MCP 工具", icon: I.plug, run: () => go("mcps") },
-    { section: "前往", label: "全局规则", icon: I.doc, run: () => go("rules") },
+    { section: "前往", label: "全局规则", icon: I.doc, run: () => switchSpace("rules") },
     { section: "前往", label: "需要处理", icon: I.alert, run: () => go("attention") },
     { section: "前往", label: "AI 应用", icon: I.sparkle, run: () => go("agents") },
     { section: "前往", label: "云端同步", icon: I.cloud, run: () => go("settings") },
@@ -2008,7 +2008,7 @@ document.addEventListener("keydown", (event) => {
     }
     return;
   }
-  if (space() === "app") return;
+  if (space() === "app" || space() === "rules") return;
   if (typing) {
     // 搜索框里按 ↓ 进入列表
     if (document.activeElement.id === "search" && event.key === "ArrowDown") {
