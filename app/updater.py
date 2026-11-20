@@ -11,6 +11,8 @@ import threading
 import time
 from pathlib import Path
 
+from netproxy import git_env
+
 # 启动后多久第一次检查、之后多久查一次（秒）
 FirstDelay = 60
 CheckInterval = 6 * 3600
@@ -45,7 +47,7 @@ class Updater:
         flags = subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
         try:
             done = subprocess.run(["git", *args], cwd=self.root, capture_output=True, text=True, encoding="utf-8",
-                                  errors="replace", timeout=timeout, creationflags=flags)
+                                  errors="replace", timeout=timeout, creationflags=flags, env=git_env(args))
         except (OSError, subprocess.TimeoutExpired) as error:
             raise UpdateError(f"运行 git 失败：{error}")
         if done.returncode != 0:

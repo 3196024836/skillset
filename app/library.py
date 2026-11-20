@@ -15,6 +15,8 @@ import os
 import subprocess
 from pathlib import Path
 
+from netproxy import git_env
+
 # 清单格式版本
 ManifestVersion = 1
 # git 子进程超时（秒），网络操作可能较慢
@@ -117,7 +119,7 @@ class Library:
         :param args: git 参数
         :returns: CompletedProcess
         """
-        return subprocess.run(["git", *args], cwd=self.path, capture_output=True, text=True, env=GitEnv,
+        return subprocess.run(["git", *args], cwd=self.path, capture_output=True, text=True, env=git_env(args, GitEnv),
                               encoding="utf-8", errors="replace", timeout=GitTimeout)
 
     def remote_url(self) -> str:
@@ -173,7 +175,8 @@ class Library:
         if not self.remote_url():
             raise GitError("还没有设置云端仓库地址")
         result = subprocess.run(["git", "push", "-u", "origin", "HEAD"], cwd=self.path, capture_output=True,
-                                text=True, encoding="utf-8", errors="replace", timeout=GitTimeout)
+                                text=True, encoding="utf-8", errors="replace", timeout=GitTimeout,
+                                env=git_env(("push",), GitEnv))
         if result.returncode != 0:
             raise GitError(result.stderr.strip())
         return (result.stderr or result.stdout).strip()

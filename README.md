@@ -87,6 +87,7 @@ cd skillset
 - **AI 列表**：在 `app/agents.json` 里，加新 AI 只要加一行。
 - **密钥**：存在 `data/keys.dat`，用 Windows DPAPI 加密，只有这台电脑、这个账户能解开（防的是文件被拷走；本账户下运行的程序都能解开）。换电脑用「导出备份」的文件和密码导回。
   命令行 `python app/keycli.py run 名字[=变量名] -- 命令` 只把在用的 key 交给这一个命令，输出里出现的 key 换成 `***`；只给一条密钥时，命令失败且输出像认证失败（401、invalid api key、余额不足等）会把它标成失效，换下一个 key 重跑。`keycli.py list` 列出密钥，`keycli.py fail 名字` 手动标失效，`keycli.py add 名字 --env 变量名 --clipboard`（或用管道传入）添加 key，已有这条就加成备用，都不打印明文。
+- **网络**：git 和 gh 不读 Windows 系统代理。拉取、推送、检查更新时，如果系统代理开着（如 Clash）且端口能连上，就让这些命令走它；代理没开就直连。自己设了 `HTTPS_PROXY` 或 git 的 `http.proxy` 时不插手。
 - **安全**：服务只监听 `127.0.0.1`，并校验请求头和 Host，其他网页调用不了。
 
 ## 项目结构

@@ -8,6 +8,7 @@
 import json
 import os
 import shutil
+import socket
 import subprocess
 import sys
 import time
@@ -149,6 +150,7 @@ def main() -> None:
     check(row(service, "alpha")["enabled"] and row(service, "alpha")["nameZh"] == "阿尔法", "整组启用，中文名保留")
     test_mcp_rules(service, home, UserError)
     test_keys(service)
+    test_netproxy()
     test_updater()
     service.push()
 
@@ -433,6 +435,25 @@ def test_keys(service) -> None:
           "命令行新建密钥且不露明文")
     check(addKey("Fresh", value="").returncode == 2, "没读到 key 时报错")
     check(service.keys_delete(entry["id"], False).get("needConfirm"), "删除前要确认")
+
+
+def test_netproxy() -> None:
+    """联网的 git 命令走系统代理；本地命令、用户自己配了代理、代理没开时都不插手。"""
+    import netproxy
+    saved = netproxy._system_proxy
+    try:
+        netproxy._system_proxy = lambda: "127.0.0.1:1"
+        check("HTTPS_PROXY" not in netproxy.git_env(("fetch",), {}), "代理端口没在监听时直连")
+        with socket.socket() as listener:
+            listener.bind(("127.0.0.1", 0))
+            listener.listen()
+            address = f"127.0.0.1:{listener.getsockname()[1]}"
+            netproxy._system_proxy = lambda: address
+            check(netproxy.git_env(("push", "-u", "origin"), {}).get("HTTPS_PROXY") == f"http://{address}", "推送走系统代理")
+            check("HTTPS_PROXY" not in netproxy.git_env(("status",), {}), "本地命令不读代理")
+            check(netproxy.network_env({"HTTPS_PROXY": "http://mine:1"})["HTTPS_PROXY"] == "http://mine:1", "不覆盖用户自己的代理")
+    finally:
+        netproxy._system_proxy = saved
 
 
 def test_updater() -> None:
