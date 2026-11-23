@@ -151,9 +151,11 @@ def main() -> None:
     test_mcp_rules(service, home, UserError)
     test_keys(service)
     test_export_all(service)
+    test_cloud_backup(service)
     test_netproxy()
     test_runtime_skip()
     test_updater()
+    test_diverge()
     service.push()
 
     # 换新电脑：新主目录 + 同一个远程，一键更新后全部装好
@@ -469,6 +471,23 @@ def test_export_all(service) -> None:
     check(other.import_backup(keysText, "export-pass-123")[0] == len(entries), "keys.json 能用「导入备份」导回")
 
 
+def test_cloud_backup(service) -> None:
+    """备份到云端：本机独有的 skill 也被传上去，云端有加密密钥，下载核对后的 zip 和云端一致。"""
+    import zipfile
+    from keystore import unseal
+    write_skill(Path(os.environ["SKILLMGR_HOME"]) / ".claude/skills", "local-only")
+    result = service.cloud_backup("cloud-pass-123")
+    path = Path(result["path"])
+    with zipfile.ZipFile(path) as archive:
+        names = archive.namelist()
+        keysText = archive.read("keys/keys.json").decode("utf-8")
+    check(path.is_file() and "skills/local-only/SKILL.md" in names and "manifest.json" in names, "备份后下载的 zip 含本机独有的 skill")
+    check(not any(name.startswith(".git/") for name in names) and not list(path.parent.glob("skillset-cloud-check-*")),
+          "zip 里没有 .git，临时下载已删")
+    entries = json.loads(unseal(json.loads(keysText), "cloud-pass-123"))["entries"]
+    check(len(entries) == len(service.keys.load()) and service.library.status()["ahead"] == 0, "云端密钥能解开，本机没有未推送的提交")
+
+
 def test_netproxy() -> None:
     """联网的 git 命令走系统代理；本地命令、用户自己配了代理、代理没开时都不插手。"""
     import netproxy
@@ -504,6 +523,48 @@ def test_runtime_skip() -> None:
         check((target / "SKILL.md").read_text() == "new" and not (target / "old.md").exists(), "复制后内容和源一致")
         check((target / ".runtime" / "keep.txt").exists() and not (target / ".runtime" / "Lib").exists(), "运行环境不复制也不删")
         check(dir_hash(source) == dir_hash(target), "运行环境不影响指纹")
+
+
+def test_diverge() -> None:
+    """两台电脑共用一个云端：各自改了再推，后推的那台自动合并，两边的改动都在。"""
+    from library import Library, merge3, Missing
+    check(merge3({"a": 1, "b": 1}, {"a": 2, "b": 1}, {"a": 1, "b": 3, "c": 4}) == {"a": 2, "b": 3, "c": 4}, "清单三方合并")
+    check(merge3({"a": 1, "b": 1}, {"b": 1}, {"a": 1, "b": 1}) == {"b": 1}, "本机删掉的条目合并后仍删掉")
+    check(merge3(Missing, [{"id": "g1"}], [{"id": "g2"}]) == [{"id": "g1"}, {"id": "g2"}], "分组按 id 合并")
+    remote = WorkDir / "diverge.git"
+    subprocess.run(["git", "init", "--bare", "-b", "main", str(remote)], check=True, capture_output=True)
+    home, work = Library(WorkDir / "pc-home"), Library(WorkDir / "pc-work")
+    for lib in (home, work):
+        lib.ensure()
+        lib.set_remote(str(remote))
+    write_skill(home.skillsDir, "shared", "v1")
+    home.save({"skills": {"shared": {"enabled": True}}, "groups": [{"id": "g1", "name": "甲"}]})
+    home.commit("初始")
+    home.push()
+    work.pull()
+    # 家里：加 skill-a，改 shared；公司：加 skill-b，删分组、加别的分组
+    write_skill(home.skillsDir, "skill-a")
+    write_skill(home.skillsDir, "shared", "home")
+    manifest = home.load()
+    manifest["skills"]["skill-a"] = {"enabled": True}
+    home.save(manifest)
+    home.commit("家里改动")
+    home.push()
+    write_skill(work.skillsDir, "skill-b")
+    write_skill(work.skillsDir, "shared", "work")
+    manifest = work.load()
+    manifest["skills"]["skill-b"] = {"enabled": True}
+    manifest["groups"] = [{"id": "g2", "name": "乙"}]
+    work.save(manifest)
+    work.commit("公司改动")
+    work.push()
+    merged = work.load()
+    check(set(merged["skills"]) == {"shared", "skill-a", "skill-b"} and merged["groups"] == [{"id": "g2", "name": "乙"}],
+          "分叉后推送：自动合并清单，两边新加的 skill 都在")
+    check("work" in (work.skillsDir / "shared" / "SKILL.md").read_text(encoding="utf-8") and work.status()["ahead"] == 0,
+          "同一文件冲突以本机为准，合并结果已推上云端")
+    check("合并" in home.pull() or home.load() == merged, "另一台拉取后和云端一致")
+    check(home.load() == merged and (home.skillsDir / "skill-b").is_dir(), "另一台拿到对方新加的 skill")
 
 
 def test_updater() -> None:

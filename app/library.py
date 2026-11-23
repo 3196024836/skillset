@@ -24,6 +24,47 @@ ManifestVersion = 1
 GitTimeout = 120
 # 只读命令（如 status）不去抢 index.lock，避免和其他同时读这个仓库的程序冲突
 GitEnv = {**os.environ, "GIT_OPTIONAL_LOCKS": "0"}
+# git push 因云端有本机没有的提交而被拒时，stderr 里会出现这个词
+RejectedMark = "[rejected]"
+# 三方合并里表示"这一项不存在"
+Missing = object()
+
+
+def merge3(base, ours, theirs):
+    """三方合并两份改动：只有一边改了取改了的那边，两边都改且不同时取本机（ours）。
+
+    字典按键递归合并；带 id 的对象列表（如分组）按 id 合并，顺序以本机为准、云端新加的排在后面。
+    任一参数可以是 Missing，表示那一边没有这一项。
+
+    :returns: 合并结果，可能是 Missing（被删掉）
+    """
+    if ours == theirs or theirs == base:
+        return ours
+    if ours == base:
+        return theirs
+    if _is_id_list(ours) and _is_id_list(theirs) and (base is Missing or _is_id_list(base)):
+        merged = merge3({} if base is Missing else _by_id(base), _by_id(ours), _by_id(theirs))
+        order = [item["id"] for item in ours] + [item["id"] for item in theirs if item["id"] not in _by_id(ours)]
+        return [merged[key] for key in order if key in merged]
+    if isinstance(ours, dict) and isinstance(theirs, dict) and (base is Missing or isinstance(base, dict)):
+        base = {} if base is Missing else base
+        merged = {}
+        for key in {**base, **theirs, **ours}:
+            value = merge3(base.get(key, Missing), ours.get(key, Missing), theirs.get(key, Missing))
+            if value is not Missing:
+                merged[key] = value
+        return merged
+    return ours
+
+
+def _is_id_list(value) -> bool:
+    """是不是每项都带 id 的对象列表。"""
+    return isinstance(value, list) and all(isinstance(item, dict) and "id" in item for item in value)
+
+
+def _by_id(items: list) -> dict:
+    """对象列表转成 id → 对象。"""
+    return {item["id"]: item for item in items}
 
 
 class GitError(Exception):
@@ -180,23 +221,30 @@ class Library:
         return bool(self.git("rev-parse", "--verify", "HEAD", check=False))
 
     def push(self) -> str:
-        """推送到云端。
+        """推送到云端。云端有另一台电脑推上去的新提交时，先合并再推。
 
         :returns: git 输出
         """
         if not self.remote_url():
             raise GitError("还没有设置云端仓库地址")
-        result = subprocess.run(["git", "push", "-u", "origin", "HEAD"], cwd=self.path, capture_output=True,
-                                text=True, encoding="utf-8", errors="replace", timeout=GitTimeout,
-                                env=git_env(("push",), GitEnv))
+        result = self._push()
+        if result.returncode != 0 and RejectedMark in result.stderr:
+            self.pull()
+            result = self._push()
         if result.returncode != 0:
             raise GitError(result.stderr.strip())
         return (result.stderr or result.stdout).strip()
 
-    def pull(self) -> str:
-        """从云端拉取最新内容（只允许快进，有分叉时报错让用户处理）。
+    def _push(self) -> subprocess.CompletedProcess:
+        """执行一次 git push，不检查结果。"""
+        return subprocess.run(["git", "push", "-u", "origin", "HEAD"], cwd=self.path, capture_output=True,
+                              text=True, encoding="utf-8", errors="replace", timeout=GitTimeout,
+                              env=git_env(("push",), GitEnv))
 
-        :returns: git 输出
+    def pull(self) -> str:
+        """从云端拉取最新内容。两台电脑各自改过（分叉）时自动合并，同一处都改了以本机为准。
+
+        :returns: 给用户看的结果
         """
         if not self.remote_url():
             raise GitError("还没有设置云端仓库地址")
@@ -209,7 +257,45 @@ class Library:
             self.git("reset", "--hard", "origin/main")
             self.git("branch", "--set-upstream-to=origin/main")
             return "已从云端下载"
-        return self.git("merge", "--ff-only", "origin/main") or "已是最新"
+        # 本机有没提交的改动时先提交，否则合并会拒绝
+        self.commit("保存本机改动")
+        ahead, behind = (int(part) for part in self.git("rev-list", "--left-right", "--count", "HEAD...origin/main").split())
+        if not behind:
+            return "已是最新"
+        if not ahead:
+            self.git("merge", "--ff-only", "origin/main")
+            return "已从云端更新"
+        self._merge_remote()
+        return f"已合并云端的 {behind} 个新提交（和本机的改动冲突时以本机为准）"
+
+    def _merge_remote(self) -> None:
+        """合并分叉的 origin/main：文件冲突取本机版本，清单按条目三方合并，两边各自加的都保留。"""
+        base = self.git("merge-base", "HEAD", "origin/main")
+        result = self._run("merge", "--no-ff", "--no-commit", "-X", "ours", "origin/main")
+        if not (self.path / ".git" / "MERGE_HEAD").exists():
+            raise GitError((result.stderr or result.stdout).strip() or "合并云端失败")
+        try:
+            # -X ours 解决不了"一边删、一边改"的冲突：本机还有就留本机的，本机删了就删
+            for path in self.git("diff", "--name-only", "--diff-filter=U").splitlines():
+                if path == "manifest.json":
+                    continue
+                if self._run("cat-file", "-e", f"HEAD:{path}").returncode == 0:
+                    self.git("checkout", "--ours", "--", path)
+                    self.git("add", "--", path)
+                else:
+                    self.git("rm", "-q", "--", path)
+            manifest = merge3(*(self._manifest_at(rev) for rev in (base, "HEAD", "origin/main")))
+            self.save({} if manifest is Missing else manifest)
+            self.git("add", "manifest.json")
+            self.git("commit", "-m", "合并云端改动")
+        except Exception:
+            self._run("merge", "--abort")
+            raise
+
+    def _manifest_at(self, rev: str) -> dict:
+        """读某个提交里的清单，没有时返回空字典。"""
+        result = self._run("show", f"{rev}:manifest.json")
+        return json.loads(result.stdout) if result.returncode == 0 and result.stdout.strip() else {}
 
     def status(self) -> dict:
         """汇总库的 git 状态，给界面显示。

@@ -695,7 +695,10 @@ function renderAppSettings() {
     <div class="section-foot">每 6 小时自动查一次有没有新版本。</div>
 
     <div class="section-title">备份</div>
-    <div class="card"><div class="list-row"><div class="lbl"><b>导出本机全部</b>
+    <div class="card"><div class="list-row"><div class="lbl"><b>备份到云端</b>
+        <span>把本机 skill、全局规则和密钥推到云端，再从云端下载一份核对，核对通过的 zip 存到下载文件夹</span></div>
+      <button class="btn sm primary" data-act="cloudBackup">${I.cloudUp}备份</button></div>
+      <div class="list-row"><div class="lbl"><b>导出本机全部</b>
         <span>skill、插件、MCP 工具、全局规则和密钥，打成一个 zip 存到下载文件夹</span></div>
       <button class="btn sm" data-act="exportAll">${I.cloudUp}导出</button></div></div>
     <div class="section-foot">换电脑或重装前用。密钥用你设的密码加密，怎么恢复写在 zip 里的「清单.md」。</div>
@@ -1213,6 +1216,15 @@ const Actions = {
     if (values.password !== values.again) return toast("两次密码不一样", { type: "err" });
     await task("导出本机全部", () => api("/api/export-all", { password: values.password }));
   },
+  cloudBackup: async () => {
+    const values = await promptSheet({ head: "备份到云端",
+      text: "上传所有本机的 skill 和全局规则，密钥用这个密码加密后一起推到云端仓库；推完会重新从云端下载一份逐项核对，通过后把下载下来的内容打包到下载文件夹。密码忘了密钥就导不回来。",
+      fields: [{ name: "password", label: "密钥加密密码（至少 8 位）", type: "password" }, { name: "again", label: "再输一次", type: "password" }],
+      action: "备份" });
+    if (!values) return;
+    if (values.password !== values.again) return toast("两次密码不一样", { type: "err" });
+    await task("备份到云端", () => api("/api/cloud-backup", { password: values.password }));
+  },
   appUpdate: () => updateApp(),
 };
 
@@ -1460,6 +1472,7 @@ function openPalette() {
     { section: "前往", label: "云端同步", icon: I.cloud, run: () => go("settings") },
     { section: "前往", label: "密钥", icon: I.key, run: () => switchSpace("keys") },
     { section: "前往", label: "软件设置", icon: I.gear, run: () => switchSpace("app") },
+    { section: "操作", label: "备份到云端（skill、规则、密钥，并下载核对）", icon: I.cloudUp, run: Actions.cloudBackup },
     { section: "操作", label: "导出本机全部（skill、插件、规则、密钥）", icon: I.cloudUp, run: Actions.exportAll },
     ...state.groups.map((group) => ({ section: "分组", label: group.name, icon: `<span class="dot" style="width:9px;height:9px;border-radius:50%;background:${groupColor(group.id)}"></span>`, run: () => go(`group:${group.id}`) })),
     ...[...items.values()].map((item) => ({ section: { skill: "Skill", plugin: "插件", mcp: "MCP" }[item.kind], label: title(item), hint: item.id,

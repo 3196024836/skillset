@@ -583,6 +583,10 @@ class SkillService(McpMixin, KeyMixin, ExportMixin):
             if self.library.remote_url():
                 try:
                     pullMessage = self.library.pull()
+                    # 合并出了新提交（或之前有没推上去的），顺手推上去，免得两台电脑一直分叉
+                    if self.config.get("autoPush") and self.library.status()["ahead"]:
+                        self.library.push()
+                        pullMessage += "，并已推送本机的改动"
                 except GitError as error:
                     raise UserError(f"从云端拉取失败：{error}")
             else:
@@ -923,8 +927,7 @@ class SkillService(McpMixin, KeyMixin, ExportMixin):
                     self.library.git("branch", "--set-upstream-to=origin/main", check=False)
                     message = "已连接，并下载了云端内容。点「一键同步」装到本机所有 AI。"
                 else:
-                    self.library.commit("同步清单")
-                    self.library.git("merge", "--ff-only", "origin/main", check=False)
+                    self.library.pull()
                     self.library.push()
                     message = "已连接，本机和云端已对齐"
             except GitError as error:

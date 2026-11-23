@@ -3,9 +3,13 @@
 
 密钥用密码加密，格式和「密钥」页的备份一样，换电脑时选 zip 里的 keys.json 就能用「导入备份」导回；
 其他内容是明文。插件和 MCP 只导出清单（重装即可），不导出它们的程序文件。
+
+「备份到云端」：把本机 skill、规则、加密后的密钥都推到云端仓库，再从云端重新下载一份核对，
+核对无误后把下载下来的内容打成 zip 放进下载文件夹。
 """
 
 import json
+import subprocess
 import platform
 import re
 import time
@@ -14,6 +18,12 @@ from pathlib import Path
 
 import config as cfg
 import skillfs
+from keystore import KeyStoreError, unseal
+from library import GitError, GitTimeout
+from netproxy import git_env
+
+# 云端库里放加密密钥的位置（和「密钥」页的备份文件同一格式）
+CloudKeysPath = "keys/keys.json"
 
 # zip 里第一个看到的说明文件
 InventoryName = "清单.md"
@@ -112,3 +122,86 @@ class ExportMixin:
             "- skill：在新电脑上连同一个云端仓库，点「更新」；只在本机的 skill，把 skills/ 里对应文件夹复制到 AI 的 skills 目录，再在 Skillset 里上传。",
             "- 全局规则：「规则」页 → 导入，选 rules/global.md 或 rules/本机/ 下的文件。",
             "- 插件：照上面的列表在 Claude Code 里重装。", ""])
+
+    def cloud_backup(self, password: str) -> dict:
+        """一键备份到云端：上传本机 skill、规则、加密密钥并推送，再从云端下载一份核对，打包到下载文件夹。
+
+        :param password: 加密密钥用的密码（至少 8 位）
+        :returns: {"message", "path"}
+        """
+        if not self.library.remote_url():
+            raise self.UserError("还没有连接云端仓库，先在设置里连接")
+        keyBackup, keyCount = self.keys.backup(password)
+        with self.lock:
+            # 逐个上传时先不推送，最后统一推一次
+            autoPush = self.config.get("autoPush")
+            self.config["autoPush"] = False
+            try:
+                uploadMessage = self.upload_all()["message"]
+            finally:
+                self.config["autoPush"] = autoPush
+            rules = self.state()["rules"]
+            if not rules["inCloud"]:
+                source = next((row["path"] for row in rules["targets"] if row["exists"]), "")
+                if source:
+                    self.rules_import(source)
+            keysFile = self.library.path / CloudKeysPath
+            keysFile.parent.mkdir(parents=True, exist_ok=True)
+            keysFile.write_text(json.dumps(keyBackup, indent=1), encoding="utf-8", newline="\n")
+            try:
+                self.library.commit("备份到云端")
+                self.library.pull()
+                self.library.push()
+            except GitError as error:
+                raise self.UserError(f"推送云端失败：{error}")
+            localHead = self.library.git("rev-parse", "HEAD")
+        return self._verify_cloud(localHead, password, keyCount, uploadMessage)
+
+    def _verify_cloud(self, localHead: str, password: str, keyCount: int, uploadMessage: str) -> dict:
+        """从云端重新克隆一份，逐项和本机库核对，通过后打成 zip。
+
+        :returns: {"message", "path"}
+        """
+        stamp = time.strftime("%Y%m%d-%H%M%S")
+        downloads = cfg.home_dir() / "Downloads"
+        clone = downloads / f"skillset-cloud-check-{stamp}"
+        target = downloads / f"skillset-cloud-backup-{stamp}.zip"
+        # 和本机库一样不转换换行，才能逐字节核对
+        args = ("clone", "-c", "core.autocrlf=false", "--depth", "1", "--branch", "main", self.library.remote_url(), str(clone))
+        try:
+            result = subprocess.run(["git", *args], capture_output=True, text=True, encoding="utf-8", errors="replace",
+                                    timeout=GitTimeout, env=git_env(args))
+            if result.returncode != 0:
+                raise self.UserError(f"已推送，但从云端下载核对失败：{result.stderr.strip()}")
+            problems = []
+            cloudHead = subprocess.run(["git", "rev-parse", "HEAD"], cwd=clone, capture_output=True, text=True).stdout.strip()
+            if cloudHead != localHead:
+                problems.append("云端最新提交和本机不一致")
+            localSkills = skillfs.list_skills(self.library.skillsDir)
+            cloudSkills = skillfs.list_skills(clone / "skills")
+            for skillId, path in localSkills.items():
+                if skillId not in cloudSkills:
+                    problems.append(f"云端缺少 skill：{skillId}")
+                elif skillfs.dir_hash(path) != skillfs.dir_hash(cloudSkills[skillId]):
+                    problems.append(f"云端的 {skillId} 和本机不一样")
+            if self.library.rulesPath.is_file() and (clone / "rules" / "global.md").read_bytes() != self.library.rulesPath.read_bytes():
+                problems.append("云端的全局规则和本机不一样")
+            try:
+                cloudKeys = json.loads(unseal(json.loads((clone / CloudKeysPath).read_text(encoding="utf-8")), password))
+                if len(cloudKeys["entries"]) != keyCount:
+                    problems.append("云端的密钥条数和本机不一样")
+            except (OSError, ValueError, KeyError, KeyStoreError) as error:
+                problems.append(f"云端的密钥备份解不开：{error}")
+            if problems:
+                raise self.UserError("已推送，但核对云端时发现问题：\n" + "\n".join(problems))
+            fileCount = 0
+            with zipfile.ZipFile(target, "w", zipfile.ZIP_DEFLATED) as archive:
+                for relPath, fullPath in skillfs.iter_files(clone):
+                    archive.write(fullPath, relPath)
+                    fileCount += 1
+        finally:
+            skillfs.remove_dir(clone)
+        return {"message": f"已备份到云端，并从云端下载核对通过（{len(localSkills)} 个 skill、全局规则、{keyCount} 条密钥）。\n"
+                           f"{uploadMessage}\n下载下来的完整备份：{target}（{fileCount} 个文件）\n"
+                           f"密钥在 zip 里的 {CloudKeysPath}，用这次输入的密码加密；恢复时在「密钥」页选它导入。",
+                "path": str(target)}

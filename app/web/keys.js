@@ -125,6 +125,7 @@ function keyCommands() {
     { section: "操作", label: "从 KeePassXC 的 CSV 导入", icon: I.doc, run: KeyActions["key-import-csv"] },
     { section: "前往", label: "技能", icon: I.stack, run: () => switchSpace("skills") },
     { section: "前往", label: "软件设置", icon: I.gear, run: () => switchSpace("app") },
+    { section: "操作", label: "备份到云端（skill、规则、密钥，并下载核对）", icon: I.cloudUp, run: Actions.cloudBackup },
     { section: "操作", label: "导出本机全部（skill、插件、规则、密钥）", icon: I.cloudUp, run: Actions.exportAll },
     ...(ui.keys?.entries || []).map((entry) => ({ section: "密钥", label: entry.name, hint: entry.env, text: entry.note, icon: I.key,
       run: () => { ui.keySearch = ""; ui.keyFilter = "all"; renderSideHead(); selectKey(entry.id); } })),
