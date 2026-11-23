@@ -110,6 +110,7 @@ def route(path: str, body: dict) -> dict:
         "/api/keys/export": lambda: service.keys_export(body.get("password", "")),
         "/api/keys/import-backup": lambda: service.keys_import_backup(body.get("text", ""), body.get("password", "")),
         "/api/keys/import-csv": lambda: service.keys_import_csv(body.get("text", "")),
+        "/api/export-all": lambda: service.export_all(body.get("password", "")),
         "/api/app/check": lambda: app_check(),
         "/api/app/update": lambda: app_update(),
     }

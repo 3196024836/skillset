@@ -353,6 +353,17 @@ class KeyStore:
 
     # -------------------------------------------------- 备份和导入
 
+    def backup(self, password: str) -> tuple:
+        """用密码加密全部密钥，得到可以存成文件的备份。
+
+        :param password: 备份密码
+        :returns: (备份字典, 条目数)
+        """
+        if len(password) < 8:
+            raise KeyStoreError("备份密码至少 8 位")
+        entries = self.load()
+        return seal(json.dumps({"entries": entries}, ensure_ascii=False).encode("utf-8"), password), len(entries)
+
     def export_backup(self, password: str, target: Path) -> int:
         """用密码加密导出全部密钥，换电脑也能导回。
 
@@ -360,12 +371,9 @@ class KeyStore:
         :param target: 写到哪个文件
         :returns: 导出的条目数
         """
-        if len(password) < 8:
-            raise KeyStoreError("备份密码至少 8 位")
-        entries = self.load()
-        backup = seal(json.dumps({"entries": entries}, ensure_ascii=False).encode("utf-8"), password)
+        backup, count = self.backup(password)
         Path(target).write_text(json.dumps(backup, indent=1), encoding="utf-8")
-        return len(entries)
+        return count
 
     def _merge(self, incoming: list) -> tuple:
         """把导入的条目加进来；名字已存在的跳过。

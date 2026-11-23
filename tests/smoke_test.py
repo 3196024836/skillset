@@ -150,6 +150,7 @@ def main() -> None:
     check(row(service, "alpha")["enabled"] and row(service, "alpha")["nameZh"] == "阿尔法", "整组启用，中文名保留")
     test_mcp_rules(service, home, UserError)
     test_keys(service)
+    test_export_all(service)
     test_netproxy()
     test_runtime_skip()
     test_updater()
@@ -436,6 +437,36 @@ def test_keys(service) -> None:
           "命令行新建密钥且不露明文")
     check(addKey("Fresh", value="").returncode == 2, "没读到 key 时报错")
     check(service.keys_delete(entry["id"], False).get("needConfirm"), "删除前要确认")
+
+
+def test_export_all(service) -> None:
+    """一键导出：一个 zip 里有清单、skill 文件、规则、加密的密钥；明文 key 不出现，keys.json 能直接导回。"""
+    import zipfile
+    from keystore import KeyStore, KeyStoreError, unseal
+    try:
+        service.export_all("short")
+        check(False, "导出密码太短时拒绝")
+    except KeyStoreError:
+        check(True, "导出密码太短时拒绝")
+    path = Path(service.export_all("export-pass-123")["path"])
+    state = service.state()
+    with zipfile.ZipFile(path) as archive:
+        names = archive.namelist()
+        raw = b"".join(archive.read(name) for name in names)
+        inventory = archive.read("清单.md").decode("utf-8")
+        keysText = archive.read("keys.json").decode("utf-8")
+    skillIds = {skill["id"] for skill in state["skills"]}
+    check({"清单.md", "keys.json", "manifest.json"} <= set(names)
+          and skillIds == {name.split("/")[1] for name in names if name.startswith("skills/")}, "导出包含清单、密钥和所有 skill")
+    check(any(name.startswith("rules/") for name in names), "导出包含全局规则")
+    values = [key["value"] for entry in service.keys.load() for key in entry["keys"]]
+    check(values and not any(value.encode() in raw for value in values), "导出文件里没有明文 key")
+    entries = service.keys_list()["entries"]
+    check(all(entry["name"] in inventory for entry in entries) and all(i in inventory for i in skillIds), "清单列出密钥名和 skill")
+    restored = json.loads(unseal(json.loads(keysText), "export-pass-123"))["entries"]
+    check(len(restored) == len(entries), "keys.json 能用导出密码解开")
+    other = KeyStore(WorkDir / "export-keys.dat")
+    check(other.import_backup(keysText, "export-pass-123")[0] == len(entries), "keys.json 能用「导入备份」导回")
 
 
 def test_netproxy() -> None:

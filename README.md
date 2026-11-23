@@ -25,6 +25,7 @@
 - **云端 = 你自己的 GitHub 私有仓库**：上传、更新、删除；换新电脑连上同一个仓库，一键全部装回。
 - **上传前查密钥**：发现 API key、token、私钥就拦下，不会推到云端。
 - **密钥管理**：每条密钥有名字、介绍、环境变量名，可以加多个备用 key；前面的不好使了标成失效，自动轮到下一个，失效的在侧栏标出来。只存在本机（Windows 加密），可导出带密码的备份，可从 KeePassXC 导出的 CSV 导入。
+- **一键导出本机全部**：「设置」里一键把所有 skill（含文件）、插件和 MCP 列表、全局规则、密钥打成一个 zip；密钥用你设的密码加密，zip 里的「清单.md」写了怎么恢复。
 - **需要处理页一键清理**：一键彻底删除所有关闭着的 skill、插件和 MCP，删之前列出来确认一次。
 - **软件自动更新**：每 6 小时查一次新版本（git 安装时），在左下角「设置」里也能手动检查、一键更新并重启。
 
@@ -100,7 +101,7 @@ app/
   library.py    库（git）操作        skillfs.py   扫描、哈希、复制、密钥检查
   plugins.py    claude plugin 命令   github.py    GitHub CLI 登录和建仓库
   keystore.py   密钥加密存取、备份   keycli.py    密钥命令行   key_service.py  密钥页接口
-  updater.py    软件自身的检查更新
+  export_service.py  一键导出本机全部   updater.py    软件自身的检查更新
   agents.json   支持的 AI 及目录
   web/          界面（原生 HTML/CSS/JS，无构建步骤）
 assets/         应用图标             scripts/     图标生成脚本

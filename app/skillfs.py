@@ -100,8 +100,8 @@ def read_meta(skillDir: Path) -> dict:
     return meta
 
 
-def _iter_files(root: Path):
-    """按稳定顺序遍历文件夹内的文件，跳过忽略项。
+def iter_files(root: Path):
+    """按稳定顺序遍历文件夹内的文件，跳过忽略项（运行环境、缓存等）。
 
     :param root: 根文件夹
     :returns: 生成 (相对路径字符串, 绝对路径)
@@ -127,7 +127,7 @@ def dir_hash(root: Path) -> str:
     if not root.is_dir():
         return ""
     digest = hashlib.sha256()
-    for relPath, fullPath in _iter_files(root):
+    for relPath, fullPath in iter_files(root):
         digest.update(relPath.encode("utf-8") + b"\0")
         digest.update(fullPath.read_bytes().replace(b"\r\n", b"\n") + b"\0")
     return digest.hexdigest()
@@ -168,7 +168,7 @@ def newest_mtime(root: Path) -> float:
     :param root: skill 文件夹
     :returns: 时间戳，空文件夹返回 0
     """
-    return max((fullPath.stat().st_mtime for _, fullPath in _iter_files(root)), default=0.0)
+    return max((fullPath.stat().st_mtime for _, fullPath in iter_files(root)), default=0.0)
 
 
 def remove_dir(path: Path) -> None:
@@ -216,7 +216,7 @@ def scan_secrets(root: Path) -> list:
     :returns: [{"file": 相对路径, "line": 行号, "kind": 类型}]
     """
     findings = []
-    for relPath, fullPath in _iter_files(root):
+    for relPath, fullPath in iter_files(root):
         # .env 文件本身就不该上传
         if fullPath.name == ".env" or fullPath.name.startswith(".env."):
             if fullPath.name != ".env.example":

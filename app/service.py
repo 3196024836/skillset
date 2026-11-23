@@ -7,7 +7,7 @@
 - 彻底删除 = 库和本机都删。
 - 有可能丢数据的操作（云端没有备份、本机副本有改动），先返回 needConfirm 让界面询问，用户确认后带 force 再调一次。
 - 本机副本和正本不一样时，同步不会覆盖它，只标出来。
-- MCP 工具和全局规则文档的逻辑在 mcp_service.py（混入本类）。
+- MCP 工具和全局规则文档的逻辑在 mcp_service.py，一键导出在 export_service.py（都混入本类）。
 """
 
 import hashlib
@@ -23,6 +23,7 @@ import mcp
 import plugins
 import skillfs
 from library import GitError, Library
+from export_service import ExportMixin
 from key_service import KeyMixin
 from keystore import KeyStore
 from mcp_service import McpMixin
@@ -46,7 +47,7 @@ def _key(path: Path) -> str:
     return str(path.resolve() if path.exists() else path.absolute()).lower()
 
 
-class SkillService(McpMixin, KeyMixin):
+class SkillService(McpMixin, KeyMixin, ExportMixin):
     """所有界面操作的入口，内部加锁，同一时间只执行一个操作。
 
     例：
