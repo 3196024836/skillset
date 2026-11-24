@@ -74,6 +74,8 @@ def route(path: str, body: dict) -> dict:
         "/api/upload-all": lambda: service.upload_all(),
         "/api/sync-all": lambda: service.sync_all(),
         "/api/update": lambda: service.update(),
+        "/api/upload-everything": lambda: service.upload_everything(),
+        "/api/pull-overwrite": lambda: service.pull_overwrite(bool(body.get("force"))),
         "/api/clean-duplicates": lambda: service.clean_duplicates(),
         "/api/push": lambda: service.push(),
         "/api/group/add": lambda: service.group_add(body.get("name", "")),

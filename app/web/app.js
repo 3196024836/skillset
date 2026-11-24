@@ -443,7 +443,8 @@ function renderToolbar() {
   // 扫描、更新、同步只属于技能空间
   const skillTools = space() !== "skills" ? "" : `
     <button class="btn icon ghost" data-act="rescan" title="重新扫描本机（F5）">${I.rescan}</button>
-    <button class="btn" data-act="update" title="从云端拉取最新内容并装到本机">${I.cloudDown}更新</button>
+    <button class="btn" data-act="uploadEverything" title="把本机所有改动（skill、MCP、插件）传到云端，和云端自动合并">${I.cloudUp}上传</button>
+    <button class="btn" data-act="pullOverwrite" title="从云端拉取，本机所有 AI 都换成云端版本（本机改动会被覆盖）">${I.cloudDown}拉取覆盖本地</button>
     <button class="btn primary" data-act="sync" title="把启用的 skill 装到所有选中的 AI，关闭的删掉">${I.sync}同步到所有 AI</button>
     <button class="btn icon ghost" data-act="app-menu" title="更多">${I.more}</button>`;
   bar.innerHTML = `
@@ -589,6 +590,7 @@ function chipsHtml(item) {
   if (!item.inCloud) chips.push(`<span class="chip warn" title="云端没有备份">未上传</span>`);
   if (item.modified) chips.push(`<span class="chip warn" title="本机副本和云端不一样">有改动</span>`);
   if (item.enabled && item.missing.length) chips.push(`<span class="chip warn" title="没装到：${esc(item.missing.join("、"))}">缺 ${item.missing.length} 处</span>`);
+  if (item.absent) chips.push(`<span class="chip plain" title="命令指向的程序这台电脑没有，不会装到各 AI">本机没装程序</span>`);
   if (item.duplicate) chips.push(`<span class="chip danger" title="旧目录里还有一份，同一个 AI 会读到两次">重复</span>`);
   if (!item.enabled && item.inCloud) chips.push(`<span class="chip plain">仅云端</span>`);
   return chips.join("");
@@ -1180,6 +1182,11 @@ async function batchToggle(on) {
 const Actions = {
   sync: () => task("同步到所有 AI", () => api("/api/sync-all")),
   update: () => task("从云端更新", () => api("/api/update")),
+  uploadEverything: () => task("上传本机改动", () => api("/api/upload-everything")),
+  pullOverwrite: () => task("拉取覆盖本地", async () => {
+    const first = await api("/api/pull-overwrite");
+    return confirmed("/api/pull-overwrite", {}, first, { head: "用云端版本覆盖本机？", action: "覆盖" });
+  }),
   rescan: () => task("重新扫描", async () => {
     await api("/api/reload");
     return { message: "已重新扫描本机" };
@@ -1431,6 +1438,7 @@ function appMenu() {
   return [
     { label: "命令面板", icon: I.search, hint: "Ctrl K", run: Actions.palette },
     "-",
+    { label: "从云端更新（不覆盖改动）", icon: I.cloudDown, run: Actions.update },
     { label: "上传全部改动", icon: I.cloudUp, run: Actions.uploadAll },
     { label: "推送到云端", icon: I.cloud, run: Actions.push },
     { label: "清理旧目录重复…", icon: I.sync, run: Actions.cleanDup },
@@ -1457,6 +1465,8 @@ function openPalette() {
   // 两个空间互不相干：在密钥空间只搜密钥
   const commands = space() === "keys" ? keyCommands() : [
     { section: "操作", label: "同步到所有 AI", icon: I.sync, run: Actions.sync },
+    { section: "操作", label: "上传本机所有改动", icon: I.cloudUp, run: Actions.uploadEverything },
+    { section: "操作", label: "拉取覆盖本地", icon: I.cloudDown, run: Actions.pullOverwrite },
     { section: "操作", label: "从云端更新", icon: I.cloudDown, run: Actions.update },
     { section: "操作", label: "上传全部改动", icon: I.cloudUp, run: Actions.uploadAll },
     { section: "操作", label: "推送到云端", icon: I.cloud, run: Actions.push },

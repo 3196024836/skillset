@@ -134,14 +134,16 @@ class McpMixin:
                 copyRows.append({"label": target.name, "dir": str(target.path), "name": name,
                                  "state": status, "install": target.install})
             enabled = info.get("enabled", False) if inCloud else True
-            present = {row["label"] for row in copyRows}
+            # 别的电脑上装的程序这台没有：不算缺，也不往各 AI 里装
+            absent = inCloud and mcp.program_missing(info["spec"])
+            present = {row["label"] for row in copyRows} if not absent else {t.name for t in targets}
             spec = info["spec"] if inCloud else found[0][2]
             items.append({
                 "id": mcpId, "name": info.get("name") or found[0][1], "nameZh": info.get("nameZh", ""),
                 "note": info.get("note", ""), "group": info.get("group", ""), "description": mcp.summary(spec),
                 "spec": mcp.masked(spec, names), "secretEnv": names, "inCloud": inCloud, "enabled": enabled,
                 "copies": copyRows, "missing": [t.name for t in targets if t.install and enabled and t.name not in present],
-                "modified": any(row["state"] == "modified" for row in copyRows), "duplicate": False,
+                "modified": any(row["state"] == "modified" for row in copyRows), "duplicate": False, "absent": absent,
             })
         return {"items": items, "errors": errors,
                 "targets": [{"label": t.name, "path": str(t.path), "install": t.install} for t in targets]}
@@ -263,14 +265,15 @@ class McpMixin:
             manifest, info, _targets, found = self._mcp_find(mcpId)
             if not found:
                 raise self.UserError(f"本机没有 MCP {mcpId}")
-            # Claude Code 的配置最常用，优先拿它当正本
-            target, name, spec = next((item for item in found if item[0].agentId == "claude"), found[0])
+            names = self._mcp_secrets(info, found)
+            oldSpec = info.get("spec")
+            # 和云端不一样的那份才是本机改过的；都一样或都改过时，Claude Code 的配置最常用，优先拿它当正本
+            changed = [item for item in found if oldSpec is None or not mcp.same(item[2], oldSpec, names)] or found
+            target, name, spec = next((item for item in changed if item[0].agentId == "claude"), changed[0])
             plain = mcp.scan_plain(spec)
             if plain:
                 raise self.UserError(f"{name} 的命令、参数或地址里直接写着疑似密钥（{', '.join(plain)}），已拦下，没有上传。\n"
                                      "请改成用环境变量传密钥，再上传。")
-            names = self._mcp_secrets(info, found)
-            oldSpec = info.get("spec")
             clean = mcp.strip_secrets(spec, names)
             entry = manifest["mcps"].setdefault(mcpId, {})
             entry.update({"name": info.get("name") or name, "spec": clean, "secretEnv": names, "enabled": True})
@@ -310,16 +313,17 @@ class McpMixin:
             return {"message": f"已彻底删除 MCP {name}{RestartNote}",
                     "warning": self._commit(manifest, f"删除 MCP {name}", push=True)}
 
-    def _sync_mcps(self, manifest: dict, baseMcps: dict = None) -> tuple:
+    def _sync_mcps(self, manifest: dict, baseMcps: dict = None, force: bool = False) -> tuple:
         """按清单同步 MCP：启用的补装，关闭的删掉没改过的。
 
         :param manifest: 清单
         :param baseMcps: 拉取前的清单记录；和它一样的副本也算没改过
+        :param force: 本机改过的也用云端的覆盖或删掉
         :returns: (说明, 跳过的位置)
         """
         targets = self._mcp_targets()
         copies, errors = self._mcp_scan(targets)
-        installed, removed, skipped = 0, 0, list(errors)
+        installed, removed, skipped, absent = 0, 0, list(errors), []
         for mcpId, info in manifest["mcps"].items():
             if "spec" not in info:
                 continue
@@ -329,9 +333,12 @@ class McpMixin:
             existing = {t.agentId: (n, s) for t, n, s in found}
 
             def clean(spec):
-                return mcp.same(spec, info["spec"], names) or (base is not None and mcp.same(spec, base, names))
+                return force or mcp.same(spec, info["spec"], names) or (base is not None and mcp.same(spec, base, names))
 
             try:
+                if info.get("enabled") and mcp.program_missing(info["spec"]):
+                    absent.append(f"{info.get('name') or mcpId}（{info['spec']['command']}）")
+                    continue
                 if info.get("enabled"):
                     spec, _lacking = self._mcp_fill(info["spec"], names, found)
                     for target in targets:
@@ -355,6 +362,8 @@ class McpMixin:
             except (mcp.McpError, OSError, ValueError) as error:
                 skipped.append(f"MCP {mcpId}：{error}")
         note = f"MCP 新装 {installed} 处、删除 {removed} 处。" if installed or removed else ""
+        if absent:
+            note += "\n这些 MCP 的程序本机没有，没装（在这台电脑装好程序、改好路径后再上传）：" + "、".join(absent)
         return note, skipped
 
     # ------------------------------------------------------------------ 全局规则

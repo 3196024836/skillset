@@ -152,6 +152,7 @@ def main() -> None:
     test_keys(service)
     test_export_all(service)
     test_cloud_backup(service)
+    test_upload_pull(service)
     test_netproxy()
     test_runtime_skip()
     test_updater()
@@ -486,6 +487,34 @@ def test_cloud_backup(service) -> None:
           "zip 里没有 .git，临时下载已删")
     entries = json.loads(unseal(json.loads(keysText), "cloud-pass-123"))["entries"]
     check(len(entries) == len(service.keys.load()) and service.library.status()["ahead"] == 0, "云端密钥能解开，本机没有未推送的提交")
+
+
+def test_upload_pull(service) -> None:
+    """一键上传把本机改动传上云端；一键拉取覆盖把本机改动换回云端版本；_work 和别的电脑上的程序不算差异。"""
+    claudeSkills = Path(os.environ["SKILLMGR_HOME"]) / ".claude/skills"
+    write_skill(claudeSkills, "local-only", "edited here")
+    (claudeSkills / "local-only" / "_work").mkdir()
+    (claudeSkills / "local-only" / "_work" / "run.png").write_text("output")
+    service.upload_everything()
+    master = service.library.skill_path("local-only")
+    check("edited here" in (master / "SKILL.md").read_text(encoding="utf-8") and not (master / "_work").exists(),
+          "一键上传带上本机改动，不带 _work 产物")
+    check(not row(service, "local-only")["modified"] and service.library.status()["ahead"] == 0, "上传后没有改动、没有未推送的提交")
+
+    write_skill(claudeSkills, "local-only", "edited again")
+    check("needConfirm" in service.pull_overwrite(), "有没上传的改动时，拉取覆盖先要确认")
+    service.pull_overwrite(force=True)
+    check("edited here" in (claudeSkills / "local-only" / "SKILL.md").read_text(encoding="utf-8")
+          and (claudeSkills / "local-only" / "_work" / "run.png").is_file(), "拉取覆盖换回云端版本，本机 _work 保留")
+    check(not row(service, "local-only")["modified"], "覆盖后不再显示有改动")
+
+    manifest = service.library.load()
+    manifest["mcps"]["elsewhere"] = {"name": "elsewhere", "enabled": True, "secretEnv": [],
+                                     "spec": {"type": "stdio", "command": "C:\\no-such-dir\\tool.exe", "args": [], "env": {}}}
+    service.library.save(manifest)
+    service.sync_all()
+    item = mcp_row(service, "elsewhere")
+    check(item["absent"] and not item["missing"] and not item["copies"], "别的电脑上的程序本机没有：不装、不算缺")
 
 
 def test_netproxy() -> None:

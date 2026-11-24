@@ -105,6 +105,16 @@ def strip_secrets(spec: dict, names: list) -> dict:
     return clean
 
 
+def program_missing(spec: dict) -> bool:
+    """命令写的是绝对路径、本机却没有这个程序（例如另一台电脑上的安装位置）。
+
+    :param spec: 统一格式
+    :returns: 缺程序返回 True
+    """
+    command = spec.get("command", "")
+    return spec["type"] == "stdio" and Path(command).is_absolute() and not Path(command).exists()
+
+
 def same(a: dict, b: dict, secretNames: list) -> bool:
     """比较两个 spec 是否一样，密钥的值不参与比较（云端那份本来就是空的）。
 

@@ -534,7 +534,7 @@ class SkillService(McpMixin, KeyMixin, ExportMixin):
                 message += f"，{len(failed)} 个失败：\n" + "\n\n".join(failed)
             return {"message": message}
 
-    def sync_all(self, baseHashes: dict = None, baseMcps: dict = None) -> dict:
+    def sync_all(self, baseHashes: dict = None, baseMcps: dict = None, force: bool = False) -> dict:
         """一键同步：让所有目标 AI 和云端清单一致。
 
         启用的装上（缺的补上、没改过的更新），关闭的删掉（只删没改过的），插件按清单安装，
@@ -542,6 +542,7 @@ class SkillService(McpMixin, KeyMixin, ExportMixin):
 
         :param baseHashes: 拉取前的正本指纹；这些也算"没改过"
         :param baseMcps: 拉取前的 MCP 清单记录；和它一样的配置也算"没改过"
+        :param force: 本机改过的副本和 MCP 配置也用云端的覆盖（关闭的直接删）；规则文件仍只补没有的
         :returns: 结果
         """
         with self.lock:
@@ -552,18 +553,18 @@ class SkillService(McpMixin, KeyMixin, ExportMixin):
                 clean = {skillfs.dir_hash(path), (baseHashes or {}).get(skillId, "")} - {""}
                 if enabled:
                     before = len(self._copies(skillId, installOnly=True))
-                    skipped += self._install(skillId, clean, False)
+                    skipped += self._install(skillId, clean, force)
                     installed += max(0, len(self._install_dirs()) - before)
                     continue
                 for copy in self._copies(skillId):
-                    if skillfs.dir_hash(copy) in clean:
+                    if force or skillfs.dir_hash(copy) in clean:
                         skillfs.remove_dir(copy)
                         removed += 1
                     else:
                         skipped.append(str(copy))
 
             pluginMessage = self._sync_plugins(manifest)
-            mcpMessage, mcpSkipped = self._sync_mcps(manifest, baseMcps)
+            mcpMessage, mcpSkipped = self._sync_mcps(manifest, baseMcps, force)
             rulesMessage, rulesSkipped = self._sync_rules()
             skipped += mcpSkipped + rulesSkipped
             message = f"同步完成：新装 {installed} 处，删除 {removed} 处。{mcpMessage}{rulesMessage}{pluginMessage}"
@@ -571,9 +572,86 @@ class SkillService(McpMixin, KeyMixin, ExportMixin):
                 message += "\n这些副本有本机改动，没有动：\n" + "\n".join(skipped)
             return {"message": message}
 
-    def update(self) -> dict:
+    def upload_everything(self) -> dict:
+        """一键上传：本机所有改动（skill、MCP、插件）存进云端库，和云端自动合并后推送。
+
+        全局规则只在云端还没有时导入一份；各 AI 的规则文件可能故意不同（例如某个 AI 专用的段落），
+        不自动拿哪一份当正本，在「全局规则」页手动处理。
+
+        :returns: 结果
+        """
+        if not self.library.remote_url():
+            raise UserError("还没有连接云端仓库，先在设置里连接")
+        with self.lock:
+            # 逐个上传时先不推送，最后合并后统一推一次
+            autoPush = self.config.get("autoPush")
+            self.config["autoPush"] = False
+            try:
+                lines = ["skill：" + self.upload_all()["message"]]
+                state = self.state()
+                done, failed = [], []
+                for item in state["mcps"]["items"]:
+                    if item["inCloud"] and not item["modified"]:
+                        continue
+                    try:
+                        self.mcp_upload(item["id"])
+                        done.append(item["name"])
+                    except UserError as error:
+                        failed.append(f"{item['name']}：{error}")
+                for item in state["plugins"]["items"]:
+                    if item["installed"] and not item["inCloud"]:
+                        try:
+                            self.plugin_upload(item["id"])
+                            done.append(item["id"])
+                        except UserError as error:
+                            failed.append(f"{item['id']}：{error}")
+                if not state["rules"]["inCloud"]:
+                    source = next((row for row in state["rules"]["targets"] if row["exists"]), None)
+                    if source:
+                        self.rules_import(source["path"])
+                        lines.append(f"全局规则：云端还没有，用 {source['label']} 的规则文件建了正本")
+            finally:
+                self.config["autoPush"] = autoPush
+            if done:
+                lines.append(f"MCP 和插件：上传了 {len(done)} 个（{'、'.join(done)}）")
+            if failed:
+                lines.append("这些没上传成功：\n" + "\n".join(failed))
+            try:
+                self.library.commit("上传本机改动")
+                lines.insert(0, self.library.pull())
+                self.library.push()
+            except GitError as error:
+                raise UserError(f"推送云端失败：{error}")
+            lines.insert(0, "已上传到云端，并和云端的改动合并。")
+            return {"message": "\n".join(lines)}
+
+    def local_changes(self) -> list:
+        """本机和云端不一样、拉取覆盖时会被换掉的东西。
+
+        :returns: 说明列表
+        """
+        state = self.state()
+        rows = [f"skill {item['id']}" for item in state["skills"] if item["inCloud"] and item["modified"]]
+        rows += [f"MCP {item['name']}" for item in state["mcps"]["items"] if item["inCloud"] and item["modified"]]
+        return rows
+
+    def pull_overwrite(self, force: bool = False) -> dict:
+        """一键拉取覆盖：从云端拉取，本机所有 skill 副本和 MCP 配置都换成云端版本（规则文件不动）。
+
+        :param force: 用户已确认会丢掉本机改动
+        :returns: 结果
+        """
+        if not force:
+            changed = self.local_changes()
+            if changed:
+                return {"needConfirm": "这些本机改动还没上传，会被云端版本覆盖（建议先点「上传」）：\n"
+                                       + "\n".join(changed) + "\n\n确定覆盖吗？"}
+        return self.update(force=True)
+
+    def update(self, force: bool = False) -> dict:
         """一键更新：从云端拉取，再同步到所有 AI，再更新插件。
 
+        :param force: 本机改过的也用云端版本覆盖
         :returns: 结果
         """
         with self.lock:
@@ -591,7 +669,7 @@ class SkillService(McpMixin, KeyMixin, ExportMixin):
                     raise UserError(f"从云端拉取失败：{error}")
             else:
                 pullMessage = "没有设置云端仓库，跳过拉取"
-            result = self.sync_all(baseHashes, baseMcps)
+            result = self.sync_all(baseHashes, baseMcps, force)
 
             # 更新插件市场和已安装插件
             notes = []

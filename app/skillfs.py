@@ -15,8 +15,8 @@ import stat
 from pathlib import Path
 
 # 复制和计算指纹时忽略的文件名。.runtime、.venv、venv、node_modules 是 skill 在本机装的运行环境，
-# 能重建、体积大、路径常超过 Windows 长度上限，不跟着同步
-SkipNames = {".git", "__pycache__", ".DS_Store", "Thumbs.db", ".runtime", ".venv", "venv", "node_modules"}
+# 能重建、体积大、路径常超过 Windows 长度上限，不跟着同步；_work 是 skill 跑出来的产物
+SkipNames = {".git", "__pycache__", ".DS_Store", "Thumbs.db", ".runtime", ".venv", "venv", "node_modules", "_work"}
 
 # 密钥特征：名称 -> 正则
 SecretPatterns = {
