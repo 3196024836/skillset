@@ -25,6 +25,7 @@ from pathlib import Path
 
 import config as cfg
 import plugins
+import portable
 import skillfs
 
 # 统一格式里由本工具管理的键；各 AI 自己的其他键（超时、disabled 等）写回时保留
@@ -111,7 +112,7 @@ def program_missing(spec: dict) -> bool:
     :param spec: 统一格式
     :returns: 缺程序返回 True
     """
-    command = spec.get("command", "")
+    command = portable.expand(spec.get("command", ""))
     return spec["type"] == "stdio" and Path(command).is_absolute() and not Path(command).exists()
 
 
@@ -289,14 +290,17 @@ class Target:
 
         :returns: {名字: spec}
         """
-        return {name: normalize(raw) for name, raw in self._raw().items() if name.lower() not in self.ignore}
+        servers = {name: normalize(raw) for name, raw in self._raw().items() if name.lower() not in self.ignore}
+        # 本机路径换成占位符，和库里的正本按同样的写法比较
+        return portable.collapse_obj(servers)
 
     def write(self, name: str, spec: dict) -> None:
         """添加或覆盖一个服务器，保留这条定义里本工具不管的键。
 
         :param name: 服务器名
-        :param spec: 统一格式
+        :param spec: 统一格式（可以带占位符，写入前换成本机路径）
         """
+        spec = portable.expand_obj(spec)
         existing = self._raw().get(name, {})
         if self.format == "claude":
             self._claude_write(name, spec, bool(existing))

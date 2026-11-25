@@ -169,7 +169,8 @@ def main() -> None:
     fresh.update()
     check((newHome / ".claude/skills/alpha/SKILL.md").read_text(encoding="utf-8").endswith("v2\n"), "新电脑一键更新装回最新版")
     check(row(fresh, "alpha")["nameZh"] == "阿尔法", "新电脑上中文名和分组都在")
-    check((newHome / ".claude/CLAUDE.md").read_text(encoding="utf-8") == "# rules A\n", "新电脑一键更新写上全局规则")
+    newRules = (newHome / ".claude/CLAUDE.md").read_text(encoding="utf-8")
+    check(newRules.startswith("# rules A\n") and "new line" in newRules, "新电脑一键更新写上全局规则")
 
     # 彻底删除
     check("needConfirm" in fresh.delete("beta"), "彻底删除会先询问")
@@ -490,23 +491,45 @@ def test_cloud_backup(service) -> None:
 
 
 def test_upload_pull(service) -> None:
-    """一键上传把本机改动传上云端；一键拉取覆盖把本机改动换回云端版本；_work 和别的电脑上的程序不算差异。"""
-    claudeSkills = Path(os.environ["SKILLMGR_HOME"]) / ".claude/skills"
-    write_skill(claudeSkills, "local-only", "edited here")
+    """两个同步按钮：本机改动（skill、规则）都收进库不丢；路径存成占位符；密钥用同步密码加密合并。"""
+    import json as _json
+    from keystore import unseal
+    home = Path(os.environ["SKILLMGR_HOME"])
+    claudeSkills = home / ".claude/skills"
+    write_skill(claudeSkills, "local-only", "edited here, tool at " + str(home) + "\\tools\\x.exe")
     (claudeSkills / "local-only" / "_work").mkdir()
     (claudeSkills / "local-only" / "_work" / "run.png").write_text("output")
-    service.upload_everything()
+    check("needPassword" in service.sync_upload(), "本机有密钥、还没设同步密码时先要密码")
+    service.sync_upload("cloud-pass-123")
     master = service.library.skill_path("local-only")
-    check("edited here" in (master / "SKILL.md").read_text(encoding="utf-8") and not (master / "_work").exists(),
-          "一键上传带上本机改动，不带 _work 产物")
+    masterText = (master / "SKILL.md").read_text(encoding="utf-8")
+    check("edited here" in masterText and not (master / "_work").exists(), "上传带上本机改动，不带 _work 产物")
+    check("{{HOME}}\\tools\\x.exe" in masterText and str(home) not in masterText, f"库里的路径存成占位符 {masterText!r}")
+    check(str(home) in (claudeSkills / "local-only" / "SKILL.md").read_text(encoding="utf-8"), "本机副本还是本机路径")
     check(not row(service, "local-only")["modified"] and service.library.status()["ahead"] == 0, "上传后没有改动、没有未推送的提交")
+    cloudKeys = _json.loads(unseal(_json.loads((service.library.path / "keys/keys.json").read_text(encoding="utf-8")),
+                                   "cloud-pass-123"))["entries"]
+    check(len(cloudKeys) == len(service.keys.load()), "密钥加密写进云端库")
 
+    # 拉下来合并：本机改动不会被盖掉，而是收进库
     write_skill(claudeSkills, "local-only", "edited again")
-    check("needConfirm" in service.pull_overwrite(), "有没上传的改动时，拉取覆盖先要确认")
-    service.pull_overwrite(force=True)
-    check("edited here" in (claudeSkills / "local-only" / "SKILL.md").read_text(encoding="utf-8")
-          and (claudeSkills / "local-only" / "_work" / "run.png").is_file(), "拉取覆盖换回云端版本，本机 _work 保留")
-    check(not row(service, "local-only")["modified"], "覆盖后不再显示有改动")
+    claudeRules = home / ".claude/CLAUDE.md"
+    claudeRules.write_text(claudeRules.read_text(encoding="utf-8") + "new line\n", encoding="utf-8")
+    service.sync_pull()
+    check("edited again" in (master / "SKILL.md").read_text(encoding="utf-8")
+          and (claudeSkills / "local-only" / "_work" / "run.png").is_file(), "拉下来合并保留本机改动，_work 保留")
+    check("new line" in service.library.rulesPath.read_text(encoding="utf-8")
+          and "new line" in (home / ".codex/AGENTS.md").read_text(encoding="utf-8"), "改过的规则收进正本，再写给所有 AI")
+
+    # 密钥合并：云端多出来的加进本机，一边失效算失效
+    first = service.keys.load()[0]
+    incoming = [{**first, "keys": [{**first["keys"][0], "status": "failed", "reason": "x"}]},
+                {"id": "zz", "name": "from-other-pc", "note": "", "env": "OTHER", "keys": [
+                    {"id": "k1", "value": "v" * 20, "label": "", "status": "ok", "failedAt": "", "reason": "",
+                     "addedAt": "", "lastUsedAt": ""}]}]
+    check(service.keys.merge_sync(incoming) == 2, "合并了云端的新条目和失效标记")
+    merged = {entry["name"]: entry for entry in service.keys.load()}
+    check("from-other-pc" in merged and merged[first["name"]]["keys"][0]["status"] == "failed", "合并结果正确")
 
     manifest = service.library.load()
     manifest["mcps"]["elsewhere"] = {"name": "elsewhere", "enabled": True, "secretEnv": [],

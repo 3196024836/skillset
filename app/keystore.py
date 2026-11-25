@@ -394,6 +394,41 @@ class KeyStore:
             self.save(entries)
         return added, skipped
 
+    def merge_sync(self, incoming: list) -> int:
+        """和另一台电脑的密钥合并（同步用）：名字取并集，同一条里的 key 按值取并集；
+        一边标了失效就算失效；说明、环境变量名只在本机为空时补上。
+
+        :param incoming: 云端的条目
+        :returns: 本机变了几处
+        """
+        entries = self.load()
+        byName = {entry["name"].lower(): entry for entry in entries}
+        changed = 0
+        for other in incoming:
+            entry = byName.get(other["name"].lower())
+            if entry is None:
+                entries.append(other)
+                byName[other["name"].lower()] = other
+                changed += 1
+                continue
+            for field in ("note", "env"):
+                if not entry.get(field) and other.get(field):
+                    entry[field] = other[field]
+                    changed += 1
+            byValue = {key["value"]: key for key in entry["keys"]}
+            for key in other["keys"]:
+                mine = byValue.get(key["value"])
+                if mine is None:
+                    entry["keys"].append(key)
+                    byValue[key["value"]] = key
+                    changed += 1
+                elif key.get("status") == "failed" and mine.get("status") != "failed":
+                    mine.update(status="failed", failedAt=key.get("failedAt", ""), reason=key.get("reason", ""))
+                    changed += 1
+        if changed:
+            self.save(entries)
+        return changed
+
     def import_backup(self, text: str, password: str) -> tuple:
         """导入 export_backup 生成的备份。
 

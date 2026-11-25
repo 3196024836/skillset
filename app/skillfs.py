@@ -12,7 +12,11 @@ import os
 import re
 import shutil
 import stat
+import time
 from pathlib import Path
+
+import config as cfg
+import portable
 
 # 复制和计算指纹时忽略的文件名。.runtime、.venv、venv、node_modules 是 skill 在本机装的运行环境，
 # 能重建、体积大、路径常超过 Windows 长度上限，不跟着同步；_work 是 skill 跑出来的产物
@@ -119,7 +123,8 @@ def iter_files(root: Path):
 def dir_hash(root: Path) -> str:
     """计算文件夹内容指纹，用来判断两份 skill 是否一样。
 
-    换行符统一成 LF 再算，避免 git 自动转换换行造成假差异。
+    换行符统一成 LF 再算，避免 git 自动转换换行造成假差异；文本里的本机路径先换成占位符再算，
+    这样库里的正本（存占位符）和装到本机的副本（存真实路径）内容一样时指纹也一样。
 
     :param root: skill 文件夹
     :returns: sha256 十六进制字符串；文件夹不存在时返回空字符串
@@ -129,7 +134,8 @@ def dir_hash(root: Path) -> str:
     digest = hashlib.sha256()
     for relPath, fullPath in iter_files(root):
         digest.update(relPath.encode("utf-8") + b"\0")
-        digest.update(fullPath.read_bytes().replace(b"\r\n", b"\n") + b"\0")
+        data = portable.convert_bytes(fullPath.read_bytes().replace(b"\r\n", b"\n"), portable.collapse)
+        digest.update(data + b"\0")
     return digest.hexdigest()
 
 
@@ -190,11 +196,12 @@ def remove_dir(path: Path) -> None:
     shutil.rmtree(path, onexc=onError)
 
 
-def copy_skill(source: Path, target: Path) -> None:
+def copy_skill(source: Path, target: Path, change=None) -> None:
     """把 skill 复制到目标位置，替换目标原有内容；目标里本机的运行环境（SkipNames）保留不动。
 
     :param source: 源 skill 文件夹
     :param target: 目标 skill 文件夹
+    :param change: 文本文件内容的转换（portable.collapse 存进库 / portable.expand 装到本机）
     """
     if source.resolve() == target.resolve():
         return
@@ -207,6 +214,30 @@ def copy_skill(source: Path, target: Path) -> None:
             remove_dir(child) if child.is_dir() and not child.is_symlink() else child.unlink()
     target.parent.mkdir(parents=True, exist_ok=True)
     shutil.copytree(source, target, ignore=shutil.ignore_patterns(*SkipNames), dirs_exist_ok=True)
+    if change is None:
+        return
+    for _relPath, fullPath in iter_files(target):
+        data = fullPath.read_bytes()
+        result = portable.convert_bytes(data, change)
+        if result is not data:
+            fullPath.write_bytes(result)
+
+
+def backup_dir(path: Path, tag: str) -> Path:
+    """覆盖前把整个文件夹备份到 data/backups。
+
+    :param path: 要备份的文件夹
+    :param tag: 备份名前缀
+    :returns: 备份位置
+    """
+    stamp = time.strftime("%Y%m%d-%H%M%S")
+    target = cfg.data_dir() / "backups" / f"{tag}-{stamp}"
+    index = 1
+    while target.exists():
+        index += 1
+        target = cfg.data_dir() / "backups" / f"{tag}-{stamp}-{index}"
+    shutil.copytree(path, target, ignore=shutil.ignore_patterns(*SkipNames))
+    return target
 
 
 def scan_secrets(root: Path) -> list:

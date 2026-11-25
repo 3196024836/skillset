@@ -1,46 +1,24 @@
 """
-MCP 工具和全局规则文档的业务逻辑，作为 SkillService 的一部分（混入类）。
+MCP 工具的业务逻辑，作为 SkillService 的一部分（混入类）。
 
 约定和 skill 一样：
 - 库里的清单（manifest.json 的 "mcps"）是正本；各 AI 配置文件里的是副本。
 - MCP 的 id 是名字的小写（不同 AI 里大小写可能不同），写回时沿用那个 AI 里原来的名字。
 - 像密钥的环境变量 / 请求头只上传名字，值留在本机；安装时从本机其他 AI 的副本里补上。
-- 全局规则正本在库的 rules/global.md，应用时写到各 AI 的规则文件（CLAUDE.md、AGENTS.md、GEMINI.md 等）。
+- 库里的命令和参数存占位符写法（见 portable），写进各 AI 配置时换成本机路径。
 """
 
 import json
-from pathlib import Path
 
-import config as cfg
 import mcp
-import skillfs
+import portable
 
 # 改了 MCP 以后各 AI 要重开才生效
 RestartNote = "（重开对应的 AI 后生效）"
 
 
-def _rules_text(path: Path) -> str:
-    """读规则文件，统一换行，便于比较。
-
-    :param path: 文件
-    :returns: 文本；不存在返回空
-    """
-    if not path.is_file():
-        return ""
-    return path.read_text(encoding="utf-8", errors="replace").replace("\r\n", "\n")
-
-
-def _secret_kinds(text: str) -> list:
-    """检查文本里有没有疑似密钥。
-
-    :param text: 文本
-    :returns: 发现的密钥类型
-    """
-    return [kind for kind, pattern in skillfs.SecretPatterns.items() if pattern.search(text)]
-
-
 class McpMixin:
-    """MCP 和全局规则操作。依赖 SkillService 的 lock、library、agentsDef、agent_rows、_commit。"""
+    """MCP 操作。依赖 SkillService 的 lock、library、agentsDef、agent_rows、_commit。"""
 
     # ------------------------------------------------------------------ MCP 扫描
 
@@ -137,7 +115,8 @@ class McpMixin:
             # 别的电脑上装的程序这台没有：不算缺，也不往各 AI 里装
             absent = inCloud and mcp.program_missing(info["spec"])
             present = {row["label"] for row in copyRows} if not absent else {t.name for t in targets}
-            spec = info["spec"] if inCloud else found[0][2]
+            # 界面显示本机路径
+            spec = portable.expand_obj(info["spec"] if inCloud else found[0][2])
             items.append({
                 "id": mcpId, "name": info.get("name") or found[0][1], "nameZh": info.get("nameZh", ""),
                 "note": info.get("note", ""), "group": info.get("group", ""), "description": mcp.summary(spec),
@@ -365,120 +344,3 @@ class McpMixin:
         if absent:
             note += "\n这些 MCP 的程序本机没有，没装（在这台电脑装好程序、改好路径后再上传）：" + "、".join(absent)
         return note, skipped
-
-    # ------------------------------------------------------------------ 全局规则
-
-    def _rules_targets(self) -> list:
-        """各 AI 的全局规则文件，同一个文件只列一次。
-
-        :returns: [{"path": Path, "label": str, "install": bool}]
-        """
-        merged = {}
-        for agent, row in zip(self.agentsDef, self.agent_rows()):
-            if "rules" not in agent:
-                continue
-            path = cfg.expand_path(agent["rules"])
-            entry = merged.setdefault(str(path).lower(), {"path": path, "agents": [], "install": False})
-            entry["agents"].append(agent["name"])
-            entry["install"] = entry["install"] or row["active"]
-        result = [entry for entry in merged.values() if entry["install"] or entry["path"].is_file()]
-        for entry in result:
-            entry["label"] = " / ".join(entry["agents"])
-        return result
-
-    def _rules_state(self) -> dict:
-        """生成全局规则页面要的状态。
-
-        :returns: {"inCloud", "text", "targets": [{"path", "label", "exists", "state", "install"}]}
-        """
-        master = _rules_text(self.library.rulesPath)
-        inCloud = self.library.rulesPath.is_file()
-        rows = []
-        for entry in self._rules_targets():
-            text = _rules_text(entry["path"])
-            exists = entry["path"].is_file()
-            state = "missing" if not exists else ("same" if inCloud and text.strip() == master.strip() else "different")
-            rows.append({"path": str(entry["path"]), "label": entry["label"], "exists": exists,
-                         "state": state, "install": entry["install"]})
-        return {"inCloud": inCloud, "text": master, "targets": rows}
-
-    def rules_save(self, text: str) -> dict:
-        """保存规则正本并推送云端（不自动写到各 AI，要再点「应用」）。
-
-        :param text: 规则全文
-        :returns: 结果
-        """
-        with self.lock:
-            text = text.replace("\r\n", "\n")
-            kinds = _secret_kinds(text)
-            if kinds:
-                raise self.UserError(f"规则里疑似有密钥（{', '.join(kinds)}），已拦下，没有保存。")
-            self.library.rulesPath.parent.mkdir(parents=True, exist_ok=True)
-            self.library.rulesPath.write_text(text.rstrip("\n") + "\n", encoding="utf-8", newline="\n")
-            return {"message": "已保存全局规则。点「应用到所有 AI」写进各 AI 的规则文件。",
-                    "warning": self._commit(self.library.load(), "更新全局规则", push=True)}
-
-    def rules_import(self, path: str) -> dict:
-        """把某个 AI 现有的规则文件导入成正本。
-
-        :param path: 规则文件路径（必须是已知的规则文件）
-        :returns: 结果
-        """
-        with self.lock:
-            known = {str(entry["path"]).lower(): entry["path"] for entry in self._rules_targets()}
-            source = known.get(str(path).lower())
-            if source is None or not source.is_file():
-                raise self.UserError(f"不是可导入的规则文件：{path}")
-            result = self.rules_save(_rules_text(source))
-            result["message"] = f"已从 {source} 导入。" + result["message"].replace("已保存全局规则。", "")
-            return result
-
-    def rules_apply(self, force: bool = False) -> dict:
-        """把规则正本写到所有勾选的 AI；原文件先备份到 data/backups。
-
-        :param force: 覆盖内容不同的文件
-        :returns: 结果
-        """
-        with self.lock:
-            if not self.library.rulesPath.is_file():
-                raise self.UserError("还没有全局规则，先写好保存，或从某个 AI 导入一份")
-            master = _rules_text(self.library.rulesPath)
-            targets = [entry for entry in self._rules_targets() if entry["install"]]
-            different = [str(entry["path"]) for entry in targets
-                         if entry["path"].is_file() and _rules_text(entry["path"]).strip() != master.strip()]
-            if different and not force:
-                return {"needConfirm": "这些规则文件和正本不一样，会被覆盖（原文件先备份到 data/backups）：\n"
-                                       + "\n".join(different) + "\n\n要覆盖吗？"}
-            written = []
-            for entry in targets:
-                path = entry["path"]
-                if path.is_file() and _rules_text(path).strip() == master.strip():
-                    continue
-                mcp.backup(path, "rules")
-                path.parent.mkdir(parents=True, exist_ok=True)
-                path.write_text(master, encoding="utf-8", newline="\n")
-                written.append(str(path))
-            if not written:
-                return {"message": "所有 AI 的规则已经是最新的"}
-            return {"message": "已写入：\n" + "\n".join(written)}
-
-    def _sync_rules(self) -> tuple:
-        """同步时只给还没有规则文件的 AI 写上；已有但不同的只报告，不覆盖。
-
-        :returns: (说明, 跳过的位置)
-        """
-        if not self.library.rulesPath.is_file():
-            return "", []
-        master = _rules_text(self.library.rulesPath)
-        created, skipped = 0, []
-        for entry in self._rules_targets():
-            if not entry["install"]:
-                continue
-            path = entry["path"]
-            if not path.is_file():
-                path.parent.mkdir(parents=True, exist_ok=True)
-                path.write_text(master, encoding="utf-8", newline="\n")
-                created += 1
-            elif _rules_text(path).strip() != master.strip():
-                skipped.append(f"规则文件 {path}（和正本不同，去「全局规则」页处理）")
-        return (f"规则新写 {created} 处。" if created else ""), skipped

@@ -443,8 +443,8 @@ function renderToolbar() {
   // 扫描、更新、同步只属于技能空间
   const skillTools = space() !== "skills" ? "" : `
     <button class="btn icon ghost" data-act="rescan" title="重新扫描本机（F5）">${I.rescan}</button>
-    <button class="btn" data-act="uploadEverything" title="把本机所有改动（skill、MCP、插件）传到云端，和云端自动合并">${I.cloudUp}上传</button>
-    <button class="btn" data-act="pullOverwrite" title="从云端拉取，本机所有 AI 都换成云端版本（本机改动会被覆盖）">${I.cloudDown}拉取覆盖本地</button>
+    <button class="btn" data-act="syncPull" title="从云端拉下来，和本机合并：skill、MCP、插件、全局规则、密钥都装到本机所有 AI（本机改过的先收进库，不会丢）">${I.cloudDown}拉下来合并</button>
+    <button class="btn" data-act="syncUpload" title="把本机所有东西（skill、MCP、插件、全局规则、密钥）和云端合并后上传">${I.cloudUp}上传本机所有</button>
     <button class="btn primary" data-act="sync" title="把启用的 skill 装到所有选中的 AI，关闭的删掉">${I.sync}同步到所有 AI</button>
     <button class="btn icon ghost" data-act="app-menu" title="更多">${I.more}</button>`;
   bar.innerHTML = `
@@ -672,10 +672,20 @@ function renderSettings() {
       </div>
       <div class="list-row"><div class="lbl"><b>改动后自动推送</b><span>上传、删除、改名后马上推送到云端</span></div>
         <label class="switch"><input type="checkbox" data-act="autopush" ${cfg.autoPush ? "checked" : ""}><span class="track"></span><span class="thumb"></span></label></div>
+      <div class="list-row"><div class="lbl"><b>自动同步</b><span>打开软件时和每 30 分钟自动「拉下来合并」一次</span></div>
+        <label class="switch"><input type="checkbox" data-act="autosync" ${cfg.autoSync ? "checked" : ""}><span class="track"></span><span class="thumb"></span></label></div>
       <div class="list-row"><div class="lbl"><b>本机库位置</b><span class="mono">${esc(cfg.libraryPath)}</span></div>
         <button class="btn sm" data-act="open" data-path="${esc(cfg.libraryPath)}">${I.folder}打开</button></div>
     </div>
     <div class="section-foot">云端就是你自己的 git 仓库（建议私有）。上传前会自动检查 key、token 之类的密钥，发现就拦下。</div>
+
+    <div class="section-title">本机路径</div>
+    <div class="card">${Object.entries(cfg.paths.names).map(([name, label]) => `<div class="list-row">
+      <div class="lbl"><b>${esc(label)}</b><span class="mono">{{${esc(name)}}}</span></div>
+      <input class="field mono" style="max-width:320px" data-path-name="${esc(name)}" value="${esc(cfg.paths.values[name])}" placeholder="${esc(cfg.paths.defaults[name])}" spellcheck="false"></div>`).join("")}
+      <div class="list-row"><div class="lbl"><span>空着就用默认值（括号里灰色的）</span></div>
+        <button class="btn sm" data-act="pathsSave">保存</button></div></div>
+    <div class="section-foot">skill、规则、MCP 里的路径在云端存成 {{PROJECTS}} 这样的占位符，装到每台电脑时换成这里的路径。公司电脑没有 D 盘就改成 C 盘。</div>
 
     <div class="section-title">扫描的目录</div>
     <div class="card">${dirs}</div>
@@ -1087,6 +1097,27 @@ async function confirmed(path, body, result, { head, action }) {
   return null;
 }
 
+/**
+ * 全量同步；后端要同步密码时弹框输入，再带密码重试。
+ * @returns {Promise<object|null>} 结果
+ */
+async function syncWithPassword(path) {
+  let result = await api(path);
+  while (result?.needPassword) {
+    if (result.message) showResult({ message: result.message });
+    const values = await promptSheet({ head: "同步密码", text: result.needPassword,
+      fields: [{ name: "password", label: "同步密码（至少 8 位）", type: "password" }], action: "继续同步" });
+    if (!values) return result.message ? null : { message: "已取消" };
+    try {
+      result = await api(path, { password: values.password });
+    } catch (error) {
+      toast(error.message, { type: "err" });
+      result = { needPassword: `${error.message}。再输一次，或取消。` };
+    }
+  }
+  return result;
+}
+
 /** 启用或关闭一个条目。先乐观更新开关，失败再回退。 */
 async function toggleItem(item, on, { undoable = true } = {}) {
   if (ui.busyRows.has(item.key)) return;
@@ -1182,10 +1213,12 @@ async function batchToggle(on) {
 const Actions = {
   sync: () => task("同步到所有 AI", () => api("/api/sync-all")),
   update: () => task("从云端更新", () => api("/api/update")),
-  uploadEverything: () => task("上传本机改动", () => api("/api/upload-everything")),
-  pullOverwrite: () => task("拉取覆盖本地", async () => {
-    const first = await api("/api/pull-overwrite");
-    return confirmed("/api/pull-overwrite", {}, first, { head: "用云端版本覆盖本机？", action: "覆盖" });
+  syncPull: () => task("拉下来合并", () => syncWithPassword("/api/sync-pull")),
+  syncUpload: () => task("上传本机所有", () => syncWithPassword("/api/sync-upload")),
+  pathsSave: () => task("保存本机路径", () => {
+    const values = {};
+    document.querySelectorAll("[data-path-name]").forEach((input) => { values[input.dataset.pathName] = input.value; });
+    return api("/api/paths", { values });
   }),
   rescan: () => task("重新扫描", async () => {
     await api("/api/reload");
@@ -1465,8 +1498,8 @@ function openPalette() {
   // 两个空间互不相干：在密钥空间只搜密钥
   const commands = space() === "keys" ? keyCommands() : [
     { section: "操作", label: "同步到所有 AI", icon: I.sync, run: Actions.sync },
-    { section: "操作", label: "上传本机所有改动", icon: I.cloudUp, run: Actions.uploadEverything },
-    { section: "操作", label: "拉取覆盖本地", icon: I.cloudDown, run: Actions.pullOverwrite },
+    { section: "操作", label: "拉下来合并", icon: I.cloudDown, run: Actions.syncPull },
+    { section: "操作", label: "上传本机所有", icon: I.cloudUp, run: Actions.syncUpload },
     { section: "操作", label: "从云端更新", icon: I.cloudDown, run: Actions.update },
     { section: "操作", label: "上传全部改动", icon: I.cloudUp, run: Actions.uploadAll },
     { section: "操作", label: "推送到云端", icon: I.cloud, run: Actions.push },
@@ -1795,7 +1828,7 @@ document.addEventListener("click", (event) => {
   const actor = target.closest("[data-act]");
   const act = actor?.dataset.act;
   // 开关和勾选框由 change 事件处理
-  if (act === "toggle" || act === "check" || act === "target" || act === "autopush" || act === "group-toggle" || target.closest(".switch")) return;
+  if (act === "toggle" || act === "check" || act === "target" || act === "autopush" || act === "autosync" || act === "group-toggle" || target.closest(".switch")) return;
   const row = target.closest(".row[data-key]");
   const item = items.get(actor?.dataset.key || row?.dataset.key);
 
@@ -1891,6 +1924,10 @@ document.addEventListener("change", (event) => {
     saveTargets(target.dataset.id, target.checked);
   } else if (act === "group-toggle") {
     toggleGroup(target.dataset.id, target.checked);
+  } else if (act === "autosync") {
+    api("/api/auto-sync", { enabled: target.checked })
+      .then((result) => toast(result.message), (error) => toast(error.message, { type: "err" }))
+      .then(refresh);
   } else if (act === "autopush") {
     api("/api/settings", { remoteUrl: state.git.remote || "", autoPush: target.checked })
       .then(() => toast(target.checked ? "已开启自动推送" : "已关闭自动推送"), (error) => toast(error.message, { type: "err" }))

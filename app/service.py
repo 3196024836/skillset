@@ -21,12 +21,15 @@ import config as cfg
 import github
 import mcp
 import plugins
+import portable
 import skillfs
 from library import GitError, Library
 from export_service import ExportMixin
 from key_service import KeyMixin
 from keystore import KeyStore
 from mcp_service import McpMixin
+from rules_service import RulesMixin
+from sync_service import SyncMixin
 from watcher import Watcher
 from plugins import PluginError
 
@@ -47,7 +50,7 @@ def _key(path: Path) -> str:
     return str(path.resolve() if path.exists() else path.absolute()).lower()
 
 
-class SkillService(McpMixin, KeyMixin, ExportMixin):
+class SkillService(McpMixin, RulesMixin, SyncMixin, KeyMixin, ExportMixin):
     """所有界面操作的入口，内部加锁，同一时间只执行一个操作。
 
     例：
@@ -63,6 +66,8 @@ class SkillService(McpMixin, KeyMixin, ExportMixin):
         """加载配置和库。"""
         # 串行化所有操作，避免两个按钮同时改文件
         self.lock = threading.RLock()
+        # 本机路径按当前配置重新算（换了主目录或设置后不用旧缓存）
+        portable.reload()
         # 盯着各 AI 目录的变化，没变时界面问指纹几乎不花时间
         self.watcher = Watcher()
         # 上次算的指纹和时间
@@ -292,7 +297,9 @@ class SkillService(McpMixin, KeyMixin, ExportMixin):
                 "git": gitInfo,
                 "config": {"libraryPath": self.config["libraryPath"], "autoPush": self.config["autoPush"],
                            "remoteUrl": gitInfo.get("remote", ""),
-                           "onboarded": bool(self.config.get("onboarded") or gitInfo.get("remote"))},
+                           "onboarded": bool(self.config.get("onboarded") or gitInfo.get("remote")),
+                           "autoSync": self.config.get("autoSync", True), "paths": self.paths_state(),
+                           "syncPassword": bool(self._sync_password())},
             }
 
     def _plugin_state(self, manifest: dict) -> dict:
@@ -373,10 +380,13 @@ class SkillService(McpMixin, KeyMixin, ExportMixin):
             target = directory / skillId
             if onlyExisting and not target.exists():
                 continue
-            if target.exists() and not force and skillfs.dir_hash(target) not in cleanHashes:
-                skipped.append(str(target))
-                continue
-            skillfs.copy_skill(source, target)
+            if target.exists() and skillfs.dir_hash(target) not in cleanHashes:
+                if not force:
+                    skipped.append(str(target))
+                    continue
+                # 强制覆盖本机改过的副本前先备份
+                skillfs.backup_dir(target, f"skill-{skillId}")
+            skillfs.copy_skill(source, target, portable.expand)
         return skipped
 
     # ------------------------------------------------------------------ skill 操作
@@ -465,7 +475,8 @@ class SkillService(McpMixin, KeyMixin, ExportMixin):
             # 复制前记下旧正本的指纹，用来判断其他副本是否改过
             target = self.library.skill_path(skillId)
             oldHash = skillfs.dir_hash(target)
-            skillfs.copy_skill(newest, target)
+            # 库里存占位符，换电脑也能用
+            skillfs.copy_skill(newest, target, portable.collapse)
             manifest = self.library.load()
             manifest["skills"].setdefault(skillId, {})["enabled"] = True
             warning = self._commit(manifest, f"上传 {skillId}", push=True)
@@ -538,11 +549,11 @@ class SkillService(McpMixin, KeyMixin, ExportMixin):
         """一键同步：让所有目标 AI 和云端清单一致。
 
         启用的装上（缺的补上、没改过的更新），关闭的删掉（只删没改过的），插件按清单安装，
-        MCP 同理；规则文件只给还没有的 AI 写上。
+        MCP 同理；规则文件只给还没有的 AI 写上（force 时不同的也换成库里的，原文件先备份）。
 
         :param baseHashes: 拉取前的正本指纹；这些也算"没改过"
         :param baseMcps: 拉取前的 MCP 清单记录；和它一样的配置也算"没改过"
-        :param force: 本机改过的副本和 MCP 配置也用云端的覆盖（关闭的直接删）；规则文件仍只补没有的
+        :param force: 本机改过的副本、MCP 配置和规则文件也用云端的覆盖（关闭的直接删，改过的先备份）
         :returns: 结果
         """
         with self.lock:
@@ -565,88 +576,12 @@ class SkillService(McpMixin, KeyMixin, ExportMixin):
 
             pluginMessage = self._sync_plugins(manifest)
             mcpMessage, mcpSkipped = self._sync_mcps(manifest, baseMcps, force)
-            rulesMessage, rulesSkipped = self._sync_rules()
+            rulesMessage, rulesSkipped = self._sync_rules(force)
             skipped += mcpSkipped + rulesSkipped
             message = f"同步完成：新装 {installed} 处，删除 {removed} 处。{mcpMessage}{rulesMessage}{pluginMessage}"
             if skipped:
                 message += "\n这些副本有本机改动，没有动：\n" + "\n".join(skipped)
             return {"message": message}
-
-    def upload_everything(self) -> dict:
-        """一键上传：本机所有改动（skill、MCP、插件）存进云端库，和云端自动合并后推送。
-
-        全局规则只在云端还没有时导入一份；各 AI 的规则文件可能故意不同（例如某个 AI 专用的段落），
-        不自动拿哪一份当正本，在「全局规则」页手动处理。
-
-        :returns: 结果
-        """
-        if not self.library.remote_url():
-            raise UserError("还没有连接云端仓库，先在设置里连接")
-        with self.lock:
-            # 逐个上传时先不推送，最后合并后统一推一次
-            autoPush = self.config.get("autoPush")
-            self.config["autoPush"] = False
-            try:
-                lines = ["skill：" + self.upload_all()["message"]]
-                state = self.state()
-                done, failed = [], []
-                for item in state["mcps"]["items"]:
-                    if item["inCloud"] and not item["modified"]:
-                        continue
-                    try:
-                        self.mcp_upload(item["id"])
-                        done.append(item["name"])
-                    except UserError as error:
-                        failed.append(f"{item['name']}：{error}")
-                for item in state["plugins"]["items"]:
-                    if item["installed"] and not item["inCloud"]:
-                        try:
-                            self.plugin_upload(item["id"])
-                            done.append(item["id"])
-                        except UserError as error:
-                            failed.append(f"{item['id']}：{error}")
-                if not state["rules"]["inCloud"]:
-                    source = next((row for row in state["rules"]["targets"] if row["exists"]), None)
-                    if source:
-                        self.rules_import(source["path"])
-                        lines.append(f"全局规则：云端还没有，用 {source['label']} 的规则文件建了正本")
-            finally:
-                self.config["autoPush"] = autoPush
-            if done:
-                lines.append(f"MCP 和插件：上传了 {len(done)} 个（{'、'.join(done)}）")
-            if failed:
-                lines.append("这些没上传成功：\n" + "\n".join(failed))
-            try:
-                self.library.commit("上传本机改动")
-                lines.insert(0, self.library.pull())
-                self.library.push()
-            except GitError as error:
-                raise UserError(f"推送云端失败：{error}")
-            lines.insert(0, "已上传到云端，并和云端的改动合并。")
-            return {"message": "\n".join(lines)}
-
-    def local_changes(self) -> list:
-        """本机和云端不一样、拉取覆盖时会被换掉的东西。
-
-        :returns: 说明列表
-        """
-        state = self.state()
-        rows = [f"skill {item['id']}" for item in state["skills"] if item["inCloud"] and item["modified"]]
-        rows += [f"MCP {item['name']}" for item in state["mcps"]["items"] if item["inCloud"] and item["modified"]]
-        return rows
-
-    def pull_overwrite(self, force: bool = False) -> dict:
-        """一键拉取覆盖：从云端拉取，本机所有 skill 副本和 MCP 配置都换成云端版本（规则文件不动）。
-
-        :param force: 用户已确认会丢掉本机改动
-        :returns: 结果
-        """
-        if not force:
-            changed = self.local_changes()
-            if changed:
-                return {"needConfirm": "这些本机改动还没上传，会被云端版本覆盖（建议先点「上传」）：\n"
-                                       + "\n".join(changed) + "\n\n确定覆盖吗？"}
-        return self.update(force=True)
 
     def update(self, force: bool = False) -> dict:
         """一键更新：从云端拉取，再同步到所有 AI，再更新插件。

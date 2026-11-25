@@ -74,8 +74,10 @@ def route(path: str, body: dict) -> dict:
         "/api/upload-all": lambda: service.upload_all(),
         "/api/sync-all": lambda: service.sync_all(),
         "/api/update": lambda: service.update(),
-        "/api/upload-everything": lambda: service.upload_everything(),
-        "/api/pull-overwrite": lambda: service.pull_overwrite(bool(body.get("force"))),
+        "/api/sync-pull": lambda: service.sync_pull(body.get("password", "")),
+        "/api/sync-upload": lambda: service.sync_upload(body.get("password", "")),
+        "/api/paths": lambda: service.paths_save(body.get("values", {})),
+        "/api/auto-sync": lambda: service.set_auto_sync(bool(body.get("enabled"))),
         "/api/clean-duplicates": lambda: service.clean_duplicates(),
         "/api/push": lambda: service.push(),
         "/api/group/add": lambda: service.group_add(body.get("name", "")),
@@ -389,6 +391,7 @@ def main() -> None:
     elif not args.no_browser:
         threading.Thread(target=run_window, args=(url, server), daemon=True).start()
     updater.start()
+    service.start_auto_sync()
     server.serve_forever()
     server.server_close()
     if restartRequested:
