@@ -11,6 +11,7 @@ import subprocess
 from pathlib import Path
 
 import config as cfg
+from netproxy import NoWindow
 from skillfs import list_skills, read_meta
 
 # 插件命令超时（秒），安装可能要下载
@@ -43,7 +44,7 @@ def run_claude(*args: str) -> str:
     :returns: 标准输出
     """
     result = subprocess.run([claude_exe(), *args], capture_output=True, text=True, encoding="utf-8",
-                            errors="replace", timeout=ClaudeTimeout)
+                            errors="replace", timeout=ClaudeTimeout, creationflags=NoWindow)
     if result.returncode != 0:
         raise PluginError((result.stderr or result.stdout).strip() or f"claude {' '.join(args)} 失败")
     return result.stdout

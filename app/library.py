@@ -15,7 +15,7 @@ import os
 import subprocess
 from pathlib import Path
 
-from netproxy import git_env
+from netproxy import NoWindow, git_env
 from skillfs import SkipNames
 
 # 清单格式版本
@@ -162,7 +162,7 @@ class Library:
         :returns: CompletedProcess
         """
         return subprocess.run(["git", *args], cwd=self.path, capture_output=True, text=True, env=git_env(args, GitEnv),
-                              encoding="utf-8", errors="replace", timeout=GitTimeout)
+                              encoding="utf-8", errors="replace", timeout=GitTimeout, creationflags=NoWindow)
 
     def remote_url(self) -> str:
         """返回 origin 远程地址，没配置时返回空字符串。
@@ -239,7 +239,7 @@ class Library:
         """执行一次 git push，不检查结果。"""
         return subprocess.run(["git", "push", "-u", "origin", "HEAD"], cwd=self.path, capture_output=True,
                               text=True, encoding="utf-8", errors="replace", timeout=GitTimeout,
-                              env=git_env(("push",), GitEnv))
+                              env=git_env(("push",), GitEnv), creationflags=NoWindow)
 
     def pull(self) -> str:
         """从云端拉取最新内容。两台电脑各自改过（分叉）时自动合并，同一处都改了以本机为准。

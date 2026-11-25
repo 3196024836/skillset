@@ -15,6 +15,8 @@ import sys
 NetworkCommands = {"fetch", "pull", "push", "clone", "ls-remote"}
 # 检查代理端口是否在监听的超时（秒）
 ProbeTimeout = 0.3
+# 后台子进程不弹黑框（Windows 下 pythonw 启动的控制台程序默认会开一个窗口）
+NoWindow = subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
 
 
 def _system_proxy() -> str:
@@ -52,10 +54,9 @@ def _user_configured(env: dict) -> bool:
     """用户自己配过代理（环境变量或 git 全局 http.proxy）就不插手。"""
     if any(env.get(name) for name in ("HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy", "ALL_PROXY", "all_proxy")):
         return True
-    flags = subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
     try:
         done = subprocess.run(["git", "config", "--global", "--get", "http.proxy"], capture_output=True, text=True,
-                              timeout=10, creationflags=flags)
+                              timeout=10, creationflags=NoWindow)
     except (OSError, subprocess.TimeoutExpired):
         return False
     return bool(done.stdout.strip())

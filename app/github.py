@@ -9,7 +9,7 @@ import shutil
 import subprocess
 import sys
 
-from netproxy import network_env
+from netproxy import NoWindow, network_env
 
 # 子进程超时（秒）
 CommandTimeout = 60
@@ -24,7 +24,7 @@ def _run(*args: str) -> subprocess.CompletedProcess:
     # gh 要连 GitHub，同样走系统代理
     env = network_env() if args[0] == "gh" else None
     return subprocess.run(list(args), capture_output=True, text=True, encoding="utf-8", errors="replace",
-                          timeout=CommandTimeout, env=env)
+                          timeout=CommandTimeout, env=env, creationflags=NoWindow)
 
 
 def status() -> dict:

@@ -20,7 +20,7 @@ import config as cfg
 import skillfs
 from keystore import KeyStoreError, unseal
 from library import GitError, GitTimeout
-from netproxy import git_env
+from netproxy import NoWindow, git_env
 
 # 云端库里放加密密钥的位置（和「密钥」页的备份文件同一格式）
 CloudKeysPath = "keys/keys.json"
@@ -170,11 +170,12 @@ class ExportMixin:
         args = ("clone", "-c", "core.autocrlf=false", "--depth", "1", "--branch", "main", self.library.remote_url(), str(clone))
         try:
             result = subprocess.run(["git", *args], capture_output=True, text=True, encoding="utf-8", errors="replace",
-                                    timeout=GitTimeout, env=git_env(args))
+                                    timeout=GitTimeout, env=git_env(args), creationflags=NoWindow)
             if result.returncode != 0:
                 raise self.UserError(f"已推送，但从云端下载核对失败：{result.stderr.strip()}")
             problems = []
-            cloudHead = subprocess.run(["git", "rev-parse", "HEAD"], cwd=clone, capture_output=True, text=True).stdout.strip()
+            cloudHead = subprocess.run(["git", "rev-parse", "HEAD"], cwd=clone, capture_output=True, text=True,
+                                       creationflags=NoWindow).stdout.strip()
             if cloudHead != localHead:
                 problems.append("云端最新提交和本机不一致")
             localSkills = skillfs.list_skills(self.library.skillsDir)
